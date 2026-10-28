@@ -22,29 +22,16 @@ Flickable {
     signal save(string json)
     signal cancelled()
 
-    readonly property bool datesOrdered: startField.stamp === "" || endField.stamp === ""
-                                         || Date.parse(endField.stamp) >= Date.parse(startField.stamp)
+    readonly property bool datesOrdered: startPicker.stamp === "" || endPicker.stamp === ""
+                                         || Date.parse(endPicker.stamp) >= Date.parse(startPicker.stamp)
     readonly property bool complete: titleField.text.trim() !== ""
-                                     && startField.stamp !== "" && endField.stamp !== ""
+                                     && startPicker.stamp !== "" && endPicker.stamp !== ""
                                      && datesOrdered
 
     contentWidth: width
     contentHeight: body.implicitHeight + Theme.s48 * 2
     clip: true
     boundsBehavior: Flickable.StopAtBounds
-
-    /// Accept a bare `YYYY-MM-DD` by reading it as midnight UTC.
-    ///
-    /// collect_core requires RFC 3339 with an offset, which is right — a
-    /// timestamp without one names no instant. But rejecting a plain date
-    /// outright just looks broken, so the obvious reading is applied here and
-    /// stated under the field.
-    function normaliseStamp(text) {
-        var trimmed = text.trim();
-        if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed))
-            return trimmed + "T00:00:00Z";
-        return trimmed;
-    }
 
     function problemFor(field) {
         return screen.problems && screen.problems[field] ? screen.problems[field] : "";
@@ -160,74 +147,24 @@ Flickable {
         Row {
             spacing: Theme.s16
 
-            Repeater {
-                model: [
-                    { key: "startsAt", label: "Starts" },
-                    { key: "endsAt", label: "Ends" }
-                ]
+            DatePicker {
+                id: startPicker
+                label: "Starts \u00b7 required"
+                width: 260
+                invalid: screen.problemFor("startsAt") !== "" || !screen.datesOrdered
+            }
 
-                delegate: Column {
-                    id: dateColumn
-                    required property var modelData
-                    spacing: Theme.s8
-
-                    Text {
-                        text: dateColumn.modelData.label + " \u00b7 required"
-                        font.family: Theme.sans
-                        font.pixelSize: Theme.meta
-                        font.weight: Theme.medium
-                        color: Theme.ink2
-                    }
-
-                    Rectangle {
-                        width: 240
-                        height: Theme.touchTarget
-                        radius: Theme.rControl
-                        color: Theme.surface
-                        border.width: 1
-                        border.color: screen.problemFor(dateColumn.modelData.key) !== "" || !screen.datesOrdered
-                                      ? Theme.amber : Theme.inputBorder
-
-                        Text {
-                            // A placeholder, since RFC 3339 is not guessable.
-                            anchors.fill: parent
-                            anchors.margins: Theme.s10
-                            verticalAlignment: Text.AlignVCenter
-                            visible: dateInput.text === ""
-                            text: "2026-11-01T00:00:00Z"
-                            font.family: Theme.mono
-                            font.pixelSize: Theme.body
-                            color: Theme.dashed
-                        }
-
-                        TextInput {
-                            id: dateInput
-                            objectName: dateColumn.modelData.key
-                            anchors.fill: parent
-                            anchors.margins: Theme.s10
-                            verticalAlignment: TextInput.AlignVCenter
-                            font.family: Theme.mono
-                            font.pixelSize: Theme.body
-                            color: Theme.ink
-                            selectByMouse: true
-                            Accessible.name: dateColumn.modelData.label + " date and time"
-                            Accessible.description: "RFC 3339 with an offset, for example 2026-11-01T00:00:00+05:30"
-                            onTextEdited: {
-                                var stamp = screen.normaliseStamp(text);
-                                if (dateColumn.modelData.key === "startsAt")
-                                    startField.stamp = stamp;
-                                else
-                                    endField.stamp = stamp;
-                            }
-                        }
-                    }
-                }
+            DatePicker {
+                id: endPicker
+                label: "Ends \u00b7 required"
+                width: 260
+                // An end date means the end of that day, not its first
+                // instant — otherwise picking today would close the
+                // experiment before it opened.
+                endOfDay: true
+                invalid: screen.problemFor("endsAt") !== "" || !screen.datesOrdered
             }
         }
-
-        // Two holders, so the bindings above have somewhere stable to write.
-        QtObject { id: startField; property string stamp: "" }
-        QtObject { id: endField; property string stamp: "" }
 
         // Each field's complaint, plus the ordering rule. Folding these into
         // one line hid any startsAt problem entirely.
@@ -262,15 +199,6 @@ Flickable {
                 font.family: Theme.sans
                 font.pixelSize: Theme.small
                 color: Theme.amber
-            }
-
-            Text {
-                width: parent.width
-                wrapMode: Text.Wrap
-                text: "Dates need a time and an offset. A bare date such as 2026-11-01 is read as midnight UTC."
-                font.family: Theme.sans
-                font.pixelSize: Theme.meta
-                color: Theme.ink3
             }
         }
 
@@ -326,8 +254,8 @@ Flickable {
                     screen.save(JSON.stringify({
                         title: titleField.text.trim(),
                         description: descriptionField.text,
-                        startsAt: startField.stamp,
-                        endsAt: endField.stamp,
+                        startsAt: startPicker.stamp,
+                        endsAt: endPicker.stamp,
                         timezone: timezoneField.text.trim()
                     }));
                 }
