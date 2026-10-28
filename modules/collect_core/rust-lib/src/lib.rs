@@ -22,7 +22,7 @@
 //!   cross the ABI. No structs, no maps — which is why every method takes and
 //!   returns a JSON string, as SPEC section 6 describes.
 
-use collect_core_logic::api;
+use collect_core_logic::{api, session::Session};
 
 /// Collect's core: documents, signing, validation, media and indexing.
 pub trait CollectCoreModule: Send + 'static {
@@ -78,6 +78,21 @@ pub trait CollectCoreModule: Send + 'static {
     /// One protocol document by id.
     fn protocols_get(&mut self, request: String) -> String;
 
+    /// Every experiment this node knows, as dashboard cards, split into the
+    /// ones this identity created and the ones it only submits to.
+    fn experiments_list(&mut self) -> String;
+
+    /// One experiment manifest plus the protocol documents this node holds.
+    fn experiments_get(&mut self, request: String) -> String;
+
+    /// Create an experiment from the details form. Saved on this node only —
+    /// publishing needs Logos Storage.
+    fn experiments_create(&mut self, request: String) -> String;
+
+    /// Attach or replace a protocol form on an experiment, bumping its
+    /// version. Saved on this node only.
+    fn protocols_save_draft(&mut self, request: String) -> String;
+
     /// Call any method by its SPEC section 6 name, e.g. `submissions.validate`.
     /// Lets the UI hold one call site, and lets `logoscore call` reach a method
     /// this trait has not named yet.
@@ -112,6 +127,10 @@ include!(concat!(env!("CARGO_MANIFEST_DIR"), "/generated/provider_gen.rs"));
 
 #[derive(Default)]
 struct Collect {
+    /// Experiments and protocols this node knows. Built lazily so it is
+    /// created after the host has stamped the context.
+    session: Option<Session>,
+
     /// Where durable state belongs, stamped by the host.
     ///
     /// `None` until `on_context_ready`, which is why nothing opens state before
@@ -120,6 +139,13 @@ struct Collect {
     /// by design, so a creator keeping its identity key or index state there
     /// would stop being the indexer after one relaunch (SPEC Q8).
     persistence_path: Option<String>,
+}
+
+impl Collect {
+    /// The live session, created on first use.
+    fn session(&mut self) -> &mut Session {
+        self.session.get_or_insert_with(Session::new)
+    }
 }
 
 impl CollectCoreModule for Collect {
@@ -177,6 +203,25 @@ impl CollectCoreModule for Collect {
 
     fn protocols_get(&mut self, request: String) -> String {
         api::protocols_get(&request)
+    }
+
+    fn experiments_list(&mut self) -> String {
+        let now = chrono::Utc::now();
+        self.session().list(now)
+    }
+
+    fn experiments_get(&mut self, request: String) -> String {
+        self.session().get(&request)
+    }
+
+    fn experiments_create(&mut self, request: String) -> String {
+        let now = chrono::Utc::now();
+        self.session().create(&request, now)
+    }
+
+    fn protocols_save_draft(&mut self, request: String) -> String {
+        let now = chrono::Utc::now();
+        self.session().save_protocol(&request, now)
     }
 
     fn call(&mut self, method: String, request: String) -> String {

@@ -20,6 +20,15 @@ Flickable {
     readonly property bool open: Core.withinWindow(experiment, nowMs)
 
     signal openProtocol(string protocolId)
+    signal back()
+
+    // The forms are behind an explicit step. Someone opening a link is
+    // reading first, and the public-data notice above is the thing they need
+    // to have seen before a form appears.
+    property bool contributing: false
+
+    // A creator looking at their own experiment is editing, not contributing.
+    property bool mine: false
 
     contentWidth: width
     contentHeight: body.implicitHeight + Theme.s48 * 2
@@ -32,6 +41,27 @@ Flickable {
         y: Theme.s32
         width: Math.min(screen.width - Theme.s32 * 2, 760)
         spacing: Theme.s24
+
+        Button {
+            id: backButton
+            height: Theme.chipHeight
+            leftPadding: Theme.s12
+            rightPadding: Theme.s14
+            text: "\u2190 All experiments"
+            Accessible.name: "Back to all experiments"
+            onClicked: screen.back()
+            contentItem: Text {
+                text: backButton.text
+                font.family: Theme.sans
+                font.pixelSize: Theme.small
+                color: Theme.ink2
+                verticalAlignment: Text.AlignVCenter
+            }
+            background: Rectangle {
+                radius: Theme.rPill
+                color: backButton.down ? Theme.surfaceSunken : "transparent"
+            }
+        }
 
         Text {
             width: parent.width
@@ -105,8 +135,55 @@ Flickable {
 
         PublicNotice {}
 
+        // ---- the gate ----
+        Column {
+            visible: !screen.contributing
+            width: parent.width
+            spacing: Theme.s12
+
+            Button {
+                id: contributeButton
+                height: Theme.touchTarget
+                leftPadding: Theme.s28
+                rightPadding: Theme.s28
+                enabled: screen.open && Core.protocolsOf(screen.experiment).length > 0
+                text: screen.mine ? "Open the forms" : "I would like to contribute to this experiment"
+                Accessible.name: contributeButton.text
+                onClicked: screen.contributing = true
+
+                contentItem: Text {
+                    text: contributeButton.text
+                    font.family: Theme.sans
+                    font.pixelSize: Theme.body
+                    font.weight: Theme.medium
+                    color: contributeButton.enabled ? Theme.textOnAccent : Theme.ink3
+                    verticalAlignment: Text.AlignVCenter
+                }
+                background: Rectangle {
+                    radius: Theme.rControl
+                    color: !contributeButton.enabled ? Theme.surfaceSunken
+                         : (contributeButton.down ? Theme.accentHover : Theme.accent)
+                }
+            }
+
+            Text {
+                width: parent.width
+                wrapMode: Text.Wrap
+                text: !screen.open
+                      ? "This experiment is not accepting submissions right now."
+                      : (Core.protocolsOf(screen.experiment).length === 0
+                         ? "This experiment has no forms yet."
+                         : (screen.mine ? "" : "You will see the forms after this, and nothing is submitted until you press Submit."))
+                visible: text !== ""
+                font.family: Theme.sans
+                font.pixelSize: Theme.small
+                color: screen.open ? Theme.ink3 : Theme.amber
+            }
+        }
+
         // ---- the forms ----
         Column {
+            visible: screen.contributing
             width: parent.width
             spacing: Theme.s12
 
@@ -173,9 +250,10 @@ Flickable {
                             leftPadding: Theme.s20
                             rightPadding: Theme.s20
                             enabled: card.fillable
-                            text: card.fillable ? "Fill in" : "Not accepting"
+                            text: !card.fillable ? "Not accepting" : (screen.mine ? "Edit" : "Fill in")
                             Accessible.name: (card.doc ? card.doc.name : card.modelData.id)
-                                             + (card.fillable ? ": fill in this form" : ": not accepting submissions")
+                                             + (!card.fillable ? ": not accepting submissions"
+                                                : (screen.mine ? ": edit this form" : ": fill in this form"))
                             onClicked: screen.openProtocol(card.modelData.id)
 
                             contentItem: Text {

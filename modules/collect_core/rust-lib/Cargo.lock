@@ -155,6 +155,7 @@ dependencies = [
 name = "collect_core"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "collect_core_logic",
  "logos-rust-sdk",
  "serde_json",

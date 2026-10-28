@@ -22,5 +22,7 @@ void CollectUiBackend::onContextReady()
     // embedded example; live it will be the manifest fetched from the link.
     // Either way the view reads the same shape, so nothing above here changes
     // when the fetch becomes real.
-    setDocuments(modules().collect_core.experiments_open(QStringLiteral("{}")));
+    // The dashboard is the landing screen, so seed the list eagerly. Each
+    // experiment's detail is fetched on demand through call().
+    setDocuments(modules().collect_core.experiments_list());
 }

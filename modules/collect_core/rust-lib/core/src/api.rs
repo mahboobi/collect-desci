@@ -56,6 +56,26 @@ pub mod code {
     pub const NOT_WIRED: &str = "not_wired";
 }
 
+/// The success envelope, for callers outside this module (notably `session`).
+pub fn envelope_ok(data: Value) -> String {
+    ok(data)
+}
+
+/// The failure envelope, for callers outside this module.
+pub fn envelope_err(code: &str, message: impl AsRef<str>) -> String {
+    err(code, message)
+}
+
+/// The embedded example experiment, for `session`'s fixtures seeding.
+pub fn fixture_experiment() -> &'static str {
+    fixture::EXPERIMENT
+}
+
+/// The embedded example protocol.
+pub fn fixture_protocol() -> &'static str {
+    fixture::PROTOCOL
+}
+
 fn ok(data: Value) -> String {
     json!({ "ok": true, "data": data }).to_string()
 }

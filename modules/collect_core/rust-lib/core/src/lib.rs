@@ -19,5 +19,6 @@ pub mod ids;
 pub mod indexer;
 pub mod media;
 pub mod schema;
+pub mod session;
 pub mod sign;
 

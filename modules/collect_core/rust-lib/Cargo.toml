@@ -18,6 +18,9 @@ crate-type = ["staticlib"]
 # in this crate does.
 serde_json = "1"
 
+# The shim stamps `now` on create/save so the logic crate stays clock-free.
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+
 # Everything Collect actually does. Kept out of this crate because the
 # builder's generator scans this lib.rs for the trait, and the trait names
 # types from a scaffold that only exists inside a Nix build — so this crate

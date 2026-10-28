@@ -29,6 +29,8 @@ QtObject {
     // fixture and live data arrive the same way — through these properties.
     // The harness, which is a plain Qt app and not sandboxed, seeds them
     // directly.
+    /// Dashboard cards from experiments.list.
+    property var cards: []
     property var experimentDoc: null
     property var protocolDoc: null
     property var submissionDoc: null
@@ -36,6 +38,49 @@ QtObject {
 
     signal loaded()
     signal failed(string reason)
+
+    /// Take an `experiments.list` envelope.
+    function applyListEnvelope(text) {
+        var envelope = core.parseEnvelope(text, "experiments.list");
+        if (!envelope)
+            return;
+        core.cards = envelope.experiments ? envelope.experiments : [];
+        core.fixtures = envelope.fixtures === true || core.fixtures;
+        core.ready = true;
+        core.loaded();
+    }
+
+    /// Take an `experiments.get` envelope: one manifest and its protocols.
+    function applyExperimentEnvelope(text) {
+        var envelope = core.parseEnvelope(text, "experiments.get");
+        if (!envelope)
+            return;
+        core.seed({
+            experiment: envelope.experiment,
+            protocol: envelope.protocols && envelope.protocols.length > 0 ? envelope.protocols[0] : null
+        });
+        core.heldProtocols = envelope.protocols ? envelope.protocols : [];
+    }
+
+    /// Every protocol document this node holds for the open experiment.
+    property var heldProtocols: []
+
+    /// Unwrap an envelope, or report and return null. A failure arrives the
+    /// same way as a success, so the caller must not assume.
+    function parseEnvelope(text, what) {
+        var envelope;
+        try {
+            envelope = JSON.parse(text);
+        } catch (e) {
+            core.failed(what + " did not return JSON: " + e);
+            return null;
+        }
+        if (!envelope.ok) {
+            core.failed(envelope.error ? envelope.error.message : (what + " failed"));
+            return null;
+        }
+        return envelope.data;
+    }
 
     // Take an `experiments.open` envelope as collect_core returns it.
     //
@@ -85,7 +130,11 @@ QtObject {
     }
 
     function protocolById(id) {
-        // One fixture protocol; a live build fetches the CID.
+        for (var i = 0; i < core.heldProtocols.length; i++) {
+            if (core.heldProtocols[i].id === id)
+                return core.heldProtocols[i];
+        }
+        // Fall back to the single seeded document.
         return core.protocolDoc && core.protocolDoc.id === id ? core.protocolDoc : null;
     }
 
