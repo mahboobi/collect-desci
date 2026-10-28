@@ -9,5 +9,6 @@ pub mod fields;
 pub mod geo;
 pub mod ids;
 pub mod indexer;
+pub mod media;
 pub mod schema;
 pub mod sign;
