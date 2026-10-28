@@ -1,0 +1,63 @@
+# logos-scaffold project file.
+#
+# Hand-authored. `lgs basecamp docs` states the [modules] table is "fully
+# hand-authorable" and that install / build-portable / doctor "read whatever
+# the table captures" without an automated writer having produced it.
+#
+# What is NOT here: the [repos.*] pins. `lgs basecamp setup` writes those on
+# its first run and rewrites any that match a retired default, so letting it
+# own them avoids pinning something by hand that setup would move anyway.
+# If `lgs` rejects this file, move it aside, run `lgs init`, and copy the two
+# sections below into what it generates.
+
+# ---------------------------------------------------------------- modules
+#
+# Both modules build today:
+#   (cd modules/collect_core && nix build .#lgx)
+#   (cd modules/collect_ui   && nix build .#lgx)
+#
+# collect_ui declares collect_core in its metadata.json dependencies, so the
+# key below must match that name exactly or basecamp cannot resolve it.
+
+[modules.collect_core]
+flake = "path:./modules/collect_core#lgx"
+role = "project"
+
+[modules.collect_ui]
+flake = "path:./modules/collect_ui#lgx"
+role = "project"
+
+# No [modules.delivery_module] or [modules.storage_module] yet: neither module
+# declares them, because the Storage and Delivery surface is not wired
+# (session.capabilities reports storage=false, delivery=false). Add them as
+# `role = "dependency"` entries at the same time as the flake inputs, so
+# scaffold reads the pin from our lock rather than from its own default.
+
+# ---------------------------------------------------------------- profiles
+#
+# SPEC section 8 runs its acceptance tests across four identities. `basecamp
+# setup` seeds only alice and bob; declaring the others here is what makes
+# them launchable ("unknown profiles are seeded on first launch").
+#
+# runtime_dir is set short on purpose. liblogos opens a
+# `logos_token_<module>` Unix socket under TMPDIR, and macOS caps the whole
+# socket path at 104 bytes — the in-profile xdg-tmp path blows that budget and
+# module loading aborts with "Unix socket path too long".
+
+[basecamp.profiles.creator]
+runtime_dir = "/tmp/lgs-creator"
+log_file = ".scaffold/basecamp/profiles/creator/basecamp.log"
+
+[basecamp.profiles.alice]
+runtime_dir = "/tmp/lgs-alice"
+log_file = ".scaffold/basecamp/profiles/alice/basecamp.log"
+
+[basecamp.profiles.bob]
+runtime_dir = "/tmp/lgs-bob"
+log_file = ".scaffold/basecamp/profiles/bob/basecamp.log"
+
+# Never submits and is not the creator — SPEC section 8 test 7 checks a pure
+# reader can still list every submission from the index pages.
+[basecamp.profiles.reader]
+runtime_dir = "/tmp/lgs-reader"
+log_file = ".scaffold/basecamp/profiles/reader/basecamp.log"

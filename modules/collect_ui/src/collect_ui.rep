@@ -1,39 +1,31 @@
 // The typed interface QML binds as logos.module("collect_ui").
 //
-// PROPs auto-sync, which is what the long-lived surfaces want: S3's progress
-// ladder and C4's cards change underneath the view rather than being polled.
-// SLOTs return through logos.watch(call, onOk, onErr).
+// This mirrors collect_core's derived contract one-for-one — see
+// docs/api-verification.md round 3 for the .lidl. Everything crosses as a
+// JSON string because that is all collect_core's Rust ABI accepts
+// (String/i64/u64/f64/bool/Vec<u8>/Option<T>), and re-encoding into a second
+// shape here would be two contracts to keep in step.
 //
-// Everything crosses as a JSON string, because that is what collect_core's
-// Rust ABI accepts (only String/i64/u64/f64/bool/Vec<u8>/Option<T>) and
-// re-encoding into a second shape here would be two contracts to keep in step.
+// PROPs auto-sync, which suits the long-lived surfaces: the header's node
+// state changes underneath the view rather than being polled. SLOTs return
+// through logos.watch(call, onOk, onErr).
 //
-// NOT YET IMPLEMENTED — see SPEC Q12. If collect_ui becomes a `ui-qml` module
-// instead, this file and the backend go away and QML calls
-// logos.callModule("collect_core", method, [json]) directly. The screens and
-// the form renderer are unaffected either way: they read from Core.qml.
+// SPEC Q12 is still open: if collect_ui becomes a `ui-qml` module, this file
+// and the backend go away and QML calls logos.callModule("collect_core", ...)
+// directly. The screens and the form renderer are unaffected either way —
+// they read from Core.qml.
 class CollectUi
 {
-    // Node, storage and delivery state, as JSON. Auto-synced so the header
-    // can show it without asking.
-    PROP(QString sessionStatus="{}" READONLY)
+    // What collect_core reports it can do, as JSON. Filled on context-ready,
+    // so the UI can disable what is not wired instead of failing at the call.
+    PROP(QString capabilities="{}" READONLY)
 
-    // The signed-in identity: key, fingerprint, name.
-    PROP(QString identity="{}" READONLY)
+    // Whether collect_core answered at all.
+    PROP(bool coreReady=false READONLY)
 
-    // ---- creator ----
-    SLOT(QString experimentsListMine())
-    SLOT(QString experimentsCreate(QString json))
-    SLOT(QString experimentsPublish(QString experimentId))
-
-    // ---- submitter ----
-    SLOT(QString experimentsOpen(QString link))
-    SLOT(QString submissionsNewDraft(QString json))
-    SLOT(QString submissionsValidate(QString draftId))
-    SLOT(QString submissionsSubmit(QString draftId))
-    SLOT(QString submissionsMine(QString experimentId))
-
-    // ---- media ----
-    // Returns a job id; progress and the cleaned media entry arrive as events.
-    SLOT(QString submissionsAddMedia(QString draftId, QString fieldKey, QString path))
+    // The generic entry point: a SPEC section 6 method name plus its JSON
+    // request. One slot rather than thirteen, because the UI already holds
+    // the method names in Core.qml and a second copy here would be a second
+    // thing to keep in step.
+    SLOT(QString call(QString method, QString request))
 }
