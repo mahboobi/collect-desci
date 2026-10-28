@@ -33,6 +33,19 @@ Flickable {
     clip: true
     boundsBehavior: Flickable.StopAtBounds
 
+    /// Accept a bare `YYYY-MM-DD` by reading it as midnight UTC.
+    ///
+    /// collect_core requires RFC 3339 with an offset, which is right — a
+    /// timestamp without one names no instant. But rejecting a plain date
+    /// outright just looks broken, so the obvious reading is applied here and
+    /// stated under the field.
+    function normaliseStamp(text) {
+        var trimmed = text.trim();
+        if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed))
+            return trimmed + "T00:00:00Z";
+        return trimmed;
+    }
+
     function problemFor(field) {
         return screen.problems && screen.problems[field] ? screen.problems[field] : "";
     }
@@ -175,6 +188,18 @@ Flickable {
                         border.color: screen.problemFor(dateColumn.modelData.key) !== "" || !screen.datesOrdered
                                       ? Theme.amber : Theme.inputBorder
 
+                        Text {
+                            // A placeholder, since RFC 3339 is not guessable.
+                            anchors.fill: parent
+                            anchors.margins: Theme.s10
+                            verticalAlignment: Text.AlignVCenter
+                            visible: dateInput.text === ""
+                            text: "2026-11-01T00:00:00Z"
+                            font.family: Theme.mono
+                            font.pixelSize: Theme.body
+                            color: Theme.dashed
+                        }
+
                         TextInput {
                             id: dateInput
                             objectName: dateColumn.modelData.key
@@ -188,10 +213,11 @@ Flickable {
                             Accessible.name: dateColumn.modelData.label + " date and time"
                             Accessible.description: "RFC 3339 with an offset, for example 2026-11-01T00:00:00+05:30"
                             onTextEdited: {
+                                var stamp = screen.normaliseStamp(text);
                                 if (dateColumn.modelData.key === "startsAt")
-                                    startField.stamp = text;
+                                    startField.stamp = stamp;
                                 else
-                                    endField.stamp = text;
+                                    endField.stamp = stamp;
                             }
                         }
                     }
@@ -203,16 +229,49 @@ Flickable {
         QtObject { id: startField; property string stamp: "" }
         QtObject { id: endField; property string stamp: "" }
 
-        Text {
-            visible: !screen.datesOrdered || screen.problemFor("endsAt") !== ""
+        // Each field's complaint, plus the ordering rule. Folding these into
+        // one line hid any startsAt problem entirely.
+        Column {
             width: parent.width
-            wrapMode: Text.Wrap
-            text: !screen.datesOrdered
-                  ? "The end date cannot be before the start date."
-                  : screen.problemFor("endsAt")
-            font.family: Theme.sans
-            font.pixelSize: Theme.small
-            color: Theme.amber
+            spacing: Theme.s4
+
+            Repeater {
+                model: [
+                    { key: "startsAt", label: "Starts" },
+                    { key: "endsAt", label: "Ends" }
+                ]
+
+                delegate: Text {
+                    id: problemLine
+                    required property var modelData
+                    visible: screen.problemFor(problemLine.modelData.key) !== ""
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    text: problemLine.modelData.label + ": " + screen.problemFor(problemLine.modelData.key)
+                    font.family: Theme.sans
+                    font.pixelSize: Theme.small
+                    color: Theme.amber
+                }
+            }
+
+            Text {
+                visible: !screen.datesOrdered
+                width: parent.width
+                wrapMode: Text.Wrap
+                text: "The end date cannot be before the start date."
+                font.family: Theme.sans
+                font.pixelSize: Theme.small
+                color: Theme.amber
+            }
+
+            Text {
+                width: parent.width
+                wrapMode: Text.Wrap
+                text: "Dates need a time and an offset. A bare date such as 2026-11-01 is read as midnight UTC."
+                font.family: Theme.sans
+                font.pixelSize: Theme.meta
+                color: Theme.ink3
+            }
         }
 
         // ---- time zone ----

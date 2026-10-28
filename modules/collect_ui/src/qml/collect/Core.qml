@@ -39,6 +39,15 @@ QtObject {
     signal loaded()
     signal failed(string reason)
 
+    /// The most recent failure, so a screen can show it. Cleared on the next
+    /// success. Without this a failed call was simply silent.
+    property string lastError: ""
+
+    function reportFailure(reason) {
+        core.lastError = reason;
+        core.failed(reason);
+    }
+
     /// Take an `experiments.list` envelope.
     function applyListEnvelope(text) {
         var envelope = core.parseEnvelope(text, "experiments.list");
@@ -72,13 +81,14 @@ QtObject {
         try {
             envelope = JSON.parse(text);
         } catch (e) {
-            core.failed(what + " did not return JSON: " + e);
+            core.reportFailure(what + " did not return JSON: " + e);
             return null;
         }
         if (!envelope.ok) {
-            core.failed(envelope.error ? envelope.error.message : (what + " failed"));
+            core.reportFailure(envelope.error ? envelope.error.message : (what + " failed"));
             return null;
         }
+        core.lastError = "";
         return envelope.data;
     }
 
@@ -91,12 +101,12 @@ QtObject {
         try {
             envelope = JSON.parse(text);
         } catch (e) {
-            core.failed("experiments.open did not return JSON: " + e);
+            core.reportFailure("experiments.open did not return JSON: " + e);
             return;
         }
         if (!envelope.ok) {
             var detail = envelope.error ? envelope.error.message : "unknown error";
-            core.failed(detail);
+            core.reportFailure(detail);
             return;
         }
         var data = envelope.data;

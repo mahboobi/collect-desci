@@ -6,6 +6,7 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
+import QtQuick.Controls
 import collect
 import "screens"
 
@@ -54,28 +55,64 @@ Item {
 
     /// One call into collect_core. Every screen goes through here, so there is
     /// a single place the call shape is known (SPEC Q12).
+    ///
+    /// A .rep SLOT with a return value is **asynchronous** over QtRO: calling
+    /// it hands back a pending call, not the value. logos.watch resolves it.
+    /// Treating the return as a string is the bug that made every call fail
+    /// silently.
     function call(method, request, onData) {
         if (!app.backend) {
-            Core.failed("collect_core is not reachable yet");
+            Core.reportFailure("collect_core is not reachable yet");
             return;
         }
-        var reply = app.backend.call(method, JSON.stringify(request));
-        // The .rep slot is synchronous through QtRO, so the reply is in hand.
-        var data = Core.parseEnvelope(reply, method);
-        if (data && onData)
-            onData(data);
+        logos.watch(app.backend.call(method, JSON.stringify(request)), // qmllint disable unqualified
+                    function (reply) {
+                        var data = Core.parseEnvelope(reply, method);
+                        if (data && onData)
+                            onData(data);
+                    },
+                    function (error) {
+                        Core.reportFailure(method + ": " + error);
+                    });
     }
 
     function openExperiment(experimentId, mine) {
-        if (!app.backend) {
-            Core.failed("collect_core is not reachable yet");
-            return;
-        }
         app.openExperimentId = experimentId;
         app.openMine = mine;
-        Core.applyExperimentEnvelope(
-            app.backend.call("experiments.get", JSON.stringify({ experimentId: experimentId })));
-        app.page = "detail";
+        app.call("experiments.get", { experimentId: experimentId }, function (data) {
+            Core.seed({
+                experiment: data.experiment,
+                protocol: data.protocols && data.protocols.length > 0 ? data.protocols[0] : null
+            });
+            Core.heldProtocols = data.protocols ? data.protocols : [];
+            app.page = "detail";
+        });
+    }
+
+    /// Like call(), but the request is already a JSON string.
+    function callRaw(method, requestJson, onData, onFail) {
+        if (!app.backend) {
+            Core.reportFailure("collect_core is not reachable yet");
+            if (onFail)
+                onFail();
+            return;
+        }
+        logos.watch(app.backend.call(method, requestJson), // qmllint disable unqualified
+                    function (reply) {
+                        var data = Core.parseEnvelope(reply, method);
+                        if (!data) {
+                            if (onFail)
+                                onFail();
+                            return;
+                        }
+                        if (onData)
+                            onData(data);
+                    },
+                    function (error) {
+                        Core.reportFailure(method + ": " + error);
+                        if (onFail)
+                            onFail();
+                    });
     }
 
     function refreshList() {
@@ -93,9 +130,58 @@ Item {
         color: Theme.ink3
     }
 
+    // Failures were silent before this: Core.failed had no listener.
+    Rectangle {
+        id: errorBanner
+        visible: Core.lastError !== ""
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: visible ? bannerText.implicitHeight + Theme.s24 : 0
+        z: 10
+        color: Theme.amberTint
+
+        Text {
+            id: bannerText
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.left: parent.left
+            anchors.right: dismiss.left
+            anchors.leftMargin: Theme.s20
+            anchors.rightMargin: Theme.s12
+            wrapMode: Text.Wrap
+            text: Core.lastError
+            font.family: Theme.sans
+            font.pixelSize: Theme.small
+            color: Theme.amber
+        }
+
+        Button {
+            id: dismiss
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.rightMargin: Theme.s12
+            width: Theme.touchTarget
+            height: Theme.touchTarget
+            text: "\u2715"
+            Accessible.name: "Dismiss this message"
+            onClicked: Core.lastError = ""
+            contentItem: Text {
+                text: dismiss.text
+                font.pixelSize: Theme.body
+                color: Theme.amber
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+            }
+            background: null
+        }
+    }
+
     Loader {
         id: pages
-        anchors.fill: parent
+        anchors.top: errorBanner.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
         visible: app.backend !== null
         sourceComponent: {
             switch (app.page) {
@@ -171,22 +257,25 @@ Item {
         NewExperiment {
             problems: app.createProblems
             onCancelled: app.page = "home"
+            id: newScreen
             onSave: function (json) {
-                var reply = app.backend.call("experiments.create", json);
-                var data = Core.parseEnvelope(reply, "experiments.create");
-                saving = false;
-                if (!data)
-                    return;
-                if (data.created !== true) {
-                    // Per-field problems, keyed for the form to show inline.
-                    var byField = ({});
-                    for (var i = 0; i < data.problems.length; i++)
-                        byField[data.problems[i].field] = data.problems[i].message;
-                    app.createProblems = byField;
-                    return;
-                }
-                app.refreshList();
-                app.openExperiment(data.experiment.id, true);
+                app.callRaw("experiments.create", json, function (data) {
+                    newScreen.saving = false;
+                    if (data.created !== true) {
+                        // Per-field problems, keyed for the form to show
+                        // inline.
+                        var byField = ({});
+                        for (var i = 0; i < data.problems.length; i++)
+                            byField[data.problems[i].field] = data.problems[i].message;
+                        app.createProblems = byField;
+                        return;
+                    }
+                    app.createProblems = ({});
+                    app.refreshList();
+                    app.openExperiment(data.experiment.id, true);
+                }, function () {
+                    newScreen.saving = false;
+                });
             }
         }
     }
