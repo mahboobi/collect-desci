@@ -26,9 +26,12 @@ use collect_core_logic::{api, session::Session};
 
 /// Collect's core: documents, signing, validation, media and indexing.
 pub trait CollectCoreModule: Send + 'static {
-    /// What this build can actually do. Worth calling first — `storage` and
-    /// `delivery` report false until SPEC Q9 and Q12 are settled.
+    /// What this build can actually do, including whether it can sign.
     fn session_capabilities(&mut self) -> String;
+
+    /// This node's signing identity: the public key documents are attributed
+    /// to, and where the private key is kept.
+    fn identity_me(&mut self) -> String;
 
     /// Canonical JSON (RFC 8785) of a document with `sig` removed: the exact
     /// bytes a signature covers.
@@ -150,7 +153,27 @@ impl Collect {
 
 impl CollectCoreModule for Collect {
     fn session_capabilities(&mut self) -> String {
-        api::session_capabilities("{}")
+        // Reported rather than assumed: the UI can disable creating before
+        // the key exists instead of failing at the call.
+        let can_sign = self.session().can_sign();
+        let base = api::session_capabilities("{}");
+        match serde_json::from_str::<serde_json::Value>(&base) {
+            Ok(mut v) => {
+                v["data"]["signing"] = serde_json::Value::Bool(can_sign);
+                v.to_string()
+            }
+            Err(_) => base,
+        }
+    }
+
+    fn identity_me(&mut self) -> String {
+        let key = self.session().creator_key().to_string();
+        let can_sign = self.session().can_sign();
+        serde_json::json!({
+            "ok": true,
+            "data": { "key": key, "signing": can_sign }
+        })
+        .to_string()
     }
 
     fn documents_canonicalize(&mut self, request: String) -> String {
@@ -231,6 +254,7 @@ impl CollectCoreModule for Collect {
         // without this they fell through to unknown_method.
         let now = chrono::Utc::now();
         match method.as_str() {
+            "identity.me" => self.identity_me(),
             "experiments.list" => self.session().list(now),
             "experiments.get" => self.session().get(&request),
             "experiments.create" => self.session().create(&request, now),
@@ -241,6 +265,13 @@ impl CollectCoreModule for Collect {
 
     fn on_context_ready(&mut self, ctx: &RustModuleContext) {
         self.persistence_path = Some(ctx.instance_persistence_path.clone());
+        // First moment a path exists, so this is where the signing key is
+        // opened. Without it `create` refuses rather than emitting an
+        // unsigned document.
+        match self.session().attach_identity(&ctx.instance_persistence_path) {
+            Ok(public) => eprintln!("collect_core: signing as {public}"),
+            Err(e) => eprintln!("collect_core: no signing key: {e}"),
+        }
     }
 }
 

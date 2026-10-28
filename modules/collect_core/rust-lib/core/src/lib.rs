@@ -15,6 +15,7 @@ pub mod api;
 pub mod canonical;
 pub mod fields;
 pub mod geo;
+pub mod identity;
 pub mod ids;
 pub mod indexer;
 pub mod media;

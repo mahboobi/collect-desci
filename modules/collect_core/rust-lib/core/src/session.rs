@@ -10,9 +10,10 @@
 //! Logos Storage (SPEC Q9/Q12), so `publish` is deliberately absent rather
 //! than faked.
 
-use crate::{api, fields, ids, schema};
+use crate::{api, fields, identity::Identity, ids, schema};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
+use std::path::Path;
 
 /// How an experiment reads on the dashboard.
 ///
@@ -41,9 +42,13 @@ pub struct Session {
     experiments: Vec<Value>,
     /// Protocol documents, by id.
     protocols: Vec<Value>,
-    /// This node's identity. Fixed in fixtures mode; from the module's
-    /// identity key once that is wired.
+    /// This node's identity. Fixed in fixtures mode so the embedded example
+    /// reads as "created by you"; otherwise the real signing key.
     creator_key: String,
+    /// The signing key, once the host has given us somewhere to keep it.
+    /// `None` means documents cannot be signed yet and are not pretended to
+    /// be — `create` refuses rather than emitting a placeholder.
+    identity: Option<Identity>,
 }
 
 impl Default for Session {
@@ -61,6 +66,7 @@ impl Session {
             // as "created by you" and the creator screens have something to
             // open.
             creator_key: "3a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f21".into(),
+            identity: None,
         };
         if api::fixtures_enabled() {
             session.seed_fixtures();
@@ -79,6 +85,39 @@ impl Session {
 
     pub fn creator_key(&self) -> &str {
         &self.creator_key
+    }
+
+    /// Open the signing key from the host's per-instance persistence path.
+    ///
+    /// Called from `on_context_ready`, which is the first moment the path
+    /// exists. Outside fixtures mode the real key also becomes the creator
+    /// identity, so experiments are attributed to whoever actually signed
+    /// them rather than to a constant.
+    pub fn attach_identity(&mut self, persistence_path: &str) -> Result<String, String> {
+        let identity = Identity::load_or_create(Path::new(persistence_path))
+            .map_err(|e| e.to_string())?;
+        let public = identity.public_hex();
+        if !api::fixtures_enabled() {
+            self.creator_key = public.clone();
+        }
+        self.identity = Some(identity);
+        Ok(public)
+    }
+
+    pub fn can_sign(&self) -> bool {
+        self.identity.is_some()
+    }
+
+    /// Sign a document, or say why not.
+    ///
+    /// Never falls back to an unsigned document: an unsigned one would be
+    /// rejected by every reader anyway, and emitting it would make a failure
+    /// look like a success.
+    fn signed(&self, doc: &Value) -> Result<Value, String> {
+        match &self.identity {
+            Some(identity) => identity.sign(doc).map_err(|e| e.to_string()),
+            None => Err("no signing key yet: the module context is not ready".to_string()),
+        }
     }
 
     fn standing(experiment: &Value, now: DateTime<Utc>) -> Standing {
@@ -282,11 +321,15 @@ impl Session {
             "index": Value::Null,
             "prev": Value::Null,
             "created_at": now.to_rfc3339(),
-            // Unsigned until publish: signing is the module identity key's
-            // job and publishing needs Storage. A placeholder keeps the shape
-            // checkable now.
+            // Replaced by the real signature below. Present so the shape is
+            // checkable before signing.
             "sig": "00".repeat(64),
         });
+
+        let experiment = match self.signed(&experiment) {
+            Ok(signed) => signed,
+            Err(e) => return api::envelope_err(api::code::NOT_WIRED, e),
+        };
 
         // Refuse anything the contract would refuse, rather than discovering
         // it at publish time.
@@ -368,6 +411,11 @@ impl Session {
             "created_at": now.to_rfc3339(),
             "sig": "00".repeat(64),
         });
+
+        let protocol = match self.signed(&protocol) {
+            Ok(signed) => signed,
+            Err(e) => return api::envelope_err(api::code::NOT_WIRED, e),
+        };
 
         let mut problems: Vec<Value> = schema::errors_as(&protocol, schema::Kind::Protocol)
             .into_iter()
@@ -462,13 +510,45 @@ mod tests {
         e["data"].clone()
     }
 
-    /// A session with no fixtures, so creation starts from nothing.
-    fn empty() -> Session {
-        Session {
+    /// A scratch directory that cleans itself up.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            // A counter, not just the name: tests run in parallel and several
+            // share a name, so a shared directory means one test's cleanup
+            // deletes another's signing key mid-run.
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = std::env::temp_dir()
+                .join(format!("collect-session-{name}-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A session with no fixtures and a real signing key, so creation starts
+    /// from nothing but can still sign.
+    fn empty_in(scratch: &Scratch) -> Session {
+        let mut session = Session {
             experiments: Vec::new(),
             protocols: Vec::new(),
             creator_key: "3a".repeat(32),
-        }
+            identity: None,
+        };
+        let public = session
+            .attach_identity(scratch.0.to_str().unwrap())
+            .expect("identity");
+        // Outside fixtures mode the signing key becomes the creator.
+        session.creator_key = public;
+        session
     }
 
     fn create_request(starts: &str, ends: &str) -> String {
@@ -485,14 +565,16 @@ mod tests {
 
     #[test]
     fn a_new_session_lists_nothing_without_fixtures() {
-        let out = data(&empty().list(at("2026-10-28T08:00:00Z")));
+        let scratch = Scratch::new("listnothing");
+        let out = data(&empty_in(&scratch).list(at("2026-10-28T08:00:00Z")));
         assert_eq!(out["experiments"], json!([]));
         assert_eq!(out["mine"], json!(0));
     }
 
     #[test]
     fn create_then_list_shows_the_card() {
-        let mut s = empty();
+        let scratch = Scratch::new("s");
+        let mut s = empty_in(&scratch);
         let made = data(&s.create(
             &create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
             at("2026-10-28T08:00:00Z"),
@@ -514,7 +596,8 @@ mod tests {
 
     #[test]
     fn a_created_experiment_validates_against_the_contract() {
-        let mut s = empty();
+        let scratch = Scratch::new("s");
+        let mut s = empty_in(&scratch);
         let made = data(&s.create(
             &create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
             at("2026-10-28T08:00:00Z"),
@@ -526,7 +609,8 @@ mod tests {
     #[test]
     fn create_rejects_an_end_before_the_start() {
         // SPEC 3.1, the inline error the C2 form shows.
-        let mut s = empty();
+        let scratch = Scratch::new("s");
+        let mut s = empty_in(&scratch);
         let out = data(&s.create(
             &create_request("2026-11-20T00:00:00Z", "2026-10-20T00:00:00Z"),
             at("2026-10-28T08:00:00Z"),
@@ -540,7 +624,8 @@ mod tests {
 
     #[test]
     fn create_requires_a_title_and_dates() {
-        let mut s = empty();
+        let scratch = Scratch::new("s");
+        let mut s = empty_in(&scratch);
         let out = data(&s.create(&json!({}).to_string(), at("2026-10-28T08:00:00Z")));
         assert_eq!(out["created"], json!(false));
         let fields: Vec<&str> = out["problems"]
@@ -556,7 +641,8 @@ mod tests {
 
     #[test]
     fn standing_follows_the_dates() {
-        let mut s = empty();
+        let scratch = Scratch::new("s");
+        let mut s = empty_in(&scratch);
         s.create(
             &create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
             at("2026-10-28T08:00:00Z"),
@@ -571,7 +657,8 @@ mod tests {
 
     #[test]
     fn get_returns_the_manifest_and_its_held_protocols() {
-        let mut s = empty();
+        let scratch = Scratch::new("s");
+        let mut s = empty_in(&scratch);
         let made = data(&s.create(
             &create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
             at("2026-10-28T08:00:00Z"),
@@ -586,13 +673,15 @@ mod tests {
 
     #[test]
     fn get_rejects_an_unknown_experiment() {
-        let out = envelope(&empty().get(&json!({ "experimentId": "q7k2m3x4w3b5n6tz" }).to_string()));
+        let scratch = Scratch::new("get");
+        let out = envelope(&empty_in(&scratch).get(&json!({ "experimentId": "q7k2m3x4w3b5n6tz" }).to_string()));
         assert_eq!(out["ok"], json!(false));
     }
 
     #[test]
     fn saving_a_protocol_attaches_it_to_the_manifest() {
-        let mut s = empty();
+        let scratch = Scratch::new("s");
+        let mut s = empty_in(&scratch);
         let now = at("2026-10-28T08:00:00Z");
         let made = data(&s.create(&create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"), now));
         let id = made["experiment"]["id"].as_str().unwrap().to_string();
@@ -629,7 +718,8 @@ mod tests {
     fn saving_the_same_protocol_again_bumps_the_version() {
         // SPEC 4: editing publishes a new version; earlier submissions name
         // the version they used.
-        let mut s = empty();
+        let scratch = Scratch::new("s");
+        let mut s = empty_in(&scratch);
         let now = at("2026-10-28T08:00:00Z");
         let made = data(&s.create(&create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"), now));
         let id = made["experiment"]["id"].as_str().unwrap().to_string();
@@ -654,7 +744,8 @@ mod tests {
     fn a_protocol_the_renderer_could_not_draw_is_refused() {
         // A choice field with no options passes nothing: the contract rejects
         // it, and so must we — before it reaches a submitter's screen.
-        let mut s = empty();
+        let scratch = Scratch::new("s");
+        let mut s = empty_in(&scratch);
         let now = at("2026-10-28T08:00:00Z");
         let made = data(&s.create(&create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"), now));
         let id = made["experiment"]["id"].as_str().unwrap().to_string();
@@ -676,7 +767,8 @@ mod tests {
 
     #[test]
     fn a_protocol_needs_a_name() {
-        let mut s = empty();
+        let scratch = Scratch::new("s");
+        let mut s = empty_in(&scratch);
         let now = at("2026-10-28T08:00:00Z");
         let made = data(&s.create(&create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"), now));
         let id = made["experiment"]["id"].as_str().unwrap().to_string();
@@ -690,11 +782,70 @@ mod tests {
 
     #[test]
     fn saving_to_an_unknown_experiment_is_refused() {
-        let out = envelope(&empty().save_protocol(
+        let scratch = Scratch::new("save");
+        let out = envelope(&empty_in(&scratch).save_protocol(
             &json!({ "experimentId": "q7k2m3x4w3b5n6tz", "protocol": { "name": "X" } }).to_string(),
             at("2026-10-28T08:00:00Z"),
         ));
         assert_eq!(out["ok"], json!(false));
+    }
+
+    #[test]
+    fn a_created_experiment_is_really_signed() {
+        // The placeholder is gone: this must verify against the creator key
+        // the document itself names.
+        let scratch = Scratch::new("signed");
+        let mut s = empty_in(&scratch);
+        let made = data(&s.create(
+            &create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
+            at("2026-10-28T08:00:00Z"),
+        ));
+        let experiment = &made["experiment"];
+        assert_ne!(experiment["sig"], json!("00".repeat(64)));
+        assert!(crate::sign::verify(experiment).is_ok(), "{experiment}");
+        assert_eq!(experiment["creator"]["key"], json!(s.creator_key()));
+    }
+
+    #[test]
+    fn a_saved_protocol_is_really_signed() {
+        let scratch = Scratch::new("signedproto");
+        let mut s = empty_in(&scratch);
+        let now = at("2026-10-28T08:00:00Z");
+        let made = data(&s.create(&create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"), now));
+        let id = made["experiment"]["id"].as_str().unwrap().to_string();
+        let saved = data(&s.save_protocol(
+            &json!({
+                "experimentId": id,
+                "protocol": { "name": "Birds",
+                    "fields": [ { "key": "count", "type": "number", "label": "How many", "required": true } ] }
+            }).to_string(),
+            now,
+        ));
+        let protocol = &saved["protocol"];
+        assert_ne!(protocol["sig"], json!("00".repeat(64)));
+        // A protocol carries no author key, so it verifies against the
+        // creator key from the manifest.
+        let mut key = [0u8; 32];
+        hex::decode_to_slice(s.creator_key(), &mut key).unwrap();
+        assert!(crate::sign::verify_with(protocol, &key).is_ok(), "{protocol}");
+    }
+
+    #[test]
+    fn creating_without_a_signing_key_is_refused() {
+        // Emitting an unsigned document would make a failure look like a
+        // success — every reader would reject it later.
+        let mut s = Session {
+            experiments: Vec::new(),
+            protocols: Vec::new(),
+            creator_key: "3a".repeat(32),
+            identity: None,
+        };
+        let out = envelope(&s.create(
+            &create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
+            at("2026-10-28T08:00:00Z"),
+        ));
+        assert_eq!(out["ok"], json!(false));
+        assert!(!s.can_sign());
     }
 
     #[test]
@@ -717,6 +868,7 @@ mod tests {
             experiments: vec![serde_json::from_str(api::fixture_experiment()).unwrap()],
             protocols: vec![serde_json::from_str(api::fixture_protocol()).unwrap()],
             creator_key: "3a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f21".into(),
+            identity: None,
         };
         let out = data(&s.list(at("2026-10-28T08:00:00Z")));
         let cards = out["experiments"].as_array().unwrap();
