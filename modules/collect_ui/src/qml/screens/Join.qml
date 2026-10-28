@@ -20,6 +20,8 @@ Flickable {
     readonly property bool open: Core.withinWindow(experiment, nowMs)
 
     signal openProtocol(string protocolId)
+    signal editProtocol(string protocolId)
+    signal addProtocol()
     signal back()
 
     // The forms are behind an explicit step. Someone opening a link is
@@ -146,7 +148,7 @@ Flickable {
                 height: Theme.touchTarget
                 leftPadding: Theme.s28
                 rightPadding: Theme.s28
-                enabled: screen.open && Core.protocolsOf(screen.experiment).length > 0
+                enabled: screen.mine || (screen.open && Core.protocolsOf(screen.experiment).length > 0)
                 text: screen.mine ? "Open the forms" : "I would like to contribute to this experiment"
                 Accessible.name: contributeButton.text
                 onClicked: screen.contributing = true
@@ -187,12 +189,44 @@ Flickable {
             width: parent.width
             spacing: Theme.s12
 
-            Text {
-                text: "Forms"
-                font.family: Theme.sans
-                font.pixelSize: Theme.sectionTitle
-                font.weight: Theme.semibold
-                color: Theme.ink
+            Row {
+                width: parent.width
+                spacing: Theme.s12
+
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "Forms"
+                    font.family: Theme.sans
+                    font.pixelSize: Theme.sectionTitle
+                    font.weight: Theme.semibold
+                    color: Theme.ink
+                }
+
+                Button {
+                    id: addForm
+                    visible: screen.mine
+                    anchors.verticalCenter: parent.verticalCenter
+                    height: Theme.chipHeight
+                    leftPadding: Theme.s14
+                    rightPadding: Theme.s14
+                    text: "+ Add a form"
+                    Accessible.name: "Add a form to this experiment"
+                    onClicked: screen.addProtocol()
+                    contentItem: Text {
+                        text: addForm.text
+                        font.family: Theme.sans
+                        font.pixelSize: Theme.small
+                        font.weight: Theme.medium
+                        color: Theme.accent
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        radius: Theme.rPill
+                        color: addForm.down ? Theme.accentTint : "transparent"
+                        border.width: 1
+                        border.color: Theme.accent
+                    }
+                }
             }
 
             Repeater {
@@ -254,7 +288,8 @@ Flickable {
                             Accessible.name: (card.doc ? card.doc.name : card.modelData.id)
                                              + (!card.fillable ? ": not accepting submissions"
                                                 : (screen.mine ? ": edit this form" : ": fill in this form"))
-                            onClicked: screen.openProtocol(card.modelData.id)
+                            onClicked: screen.mine ? screen.editProtocol(card.modelData.id)
+                                                   : screen.openProtocol(card.modelData.id)
 
                             contentItem: Text {
                                 text: fillButton.text

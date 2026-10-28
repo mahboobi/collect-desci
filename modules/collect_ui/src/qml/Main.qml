@@ -24,6 +24,9 @@ Item {
     property string lastCid: ""
     property bool receiptSeen: false
     property var createProblems: ({})
+    property var builderProblems: ({})
+    /// The protocol being edited, or null when adding a new one.
+    property var editingProtocol: null
 
     // The typed replica for this module's own backend. Null until the view
     // module is ready, so every read is guarded.
@@ -189,6 +192,7 @@ Item {
             case "form":      return formPage;
             case "submitted": return submittedPage;
             case "new":       return newPage;
+            case "builder":   return builderPage;
             default:          return homePage;
             }
         }
@@ -215,6 +219,16 @@ Item {
             nowMs: app.nowMs
             mine: app.openMine
             onBack: app.page = "home"
+            onAddProtocol: {
+                app.editingProtocol = null;
+                app.builderProblems = ({});
+                app.page = "builder";
+            }
+            onEditProtocol: function (protocolId) {
+                app.editingProtocol = Core.protocolById(protocolId);
+                app.builderProblems = ({});
+                app.page = "builder";
+            }
             onOpenProtocol: function (protocolId) {
                 app.activeProtocol = Core.protocolById(protocolId);
                 if (app.activeProtocol)
@@ -275,6 +289,37 @@ Item {
                     app.openExperiment(data.experiment.id, true);
                 }, function () {
                     newScreen.saving = false;
+                });
+            }
+        }
+    }
+
+    Component {
+        id: builderPage
+
+        Builder {
+            id: builderScreen
+            experimentId: app.openExperimentId
+            existing: app.editingProtocol
+            problems: app.builderProblems
+            onCancelled: app.page = "detail"
+            onSave: function (json) {
+                app.callRaw("protocols.saveDraft", json, function (data) {
+                    builderScreen.saving = false;
+                    if (data.saved !== true) {
+                        var byField = ({});
+                        for (var i = 0; i < data.problems.length; i++)
+                            byField[data.problems[i].field] = data.problems[i].message;
+                        app.builderProblems = byField;
+                        return;
+                    }
+                    app.builderProblems = ({});
+                    app.refreshList();
+                    // Re-open the experiment so the new form appears in its
+                    // list and the manifest version the card shows is current.
+                    app.openExperiment(app.openExperimentId, true);
+                }, function () {
+                    builderScreen.saving = false;
                 });
             }
         }
