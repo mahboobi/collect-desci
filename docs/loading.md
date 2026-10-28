@@ -1,88 +1,138 @@
-# Loading the modules into Basecamp
+# Loading Collect into Basecamp
 
-Both modules build. Neither has been **loaded** — no profile exists, and no
-call has crossed the real ABI.
-
-```bash
-(cd modules/collect_core && nix build .#lgx)   # verified
-(cd modules/collect_ui   && nix build .#lgx)   # verified
-```
-
-## What blocks loading
-
-`lgs` is gone (it lived in `~/.cargo/bin`). It has no Nix flake, so it has to
-be built with cargo from the pinned commit — and that step needs your
-approval, because it compiles code from an external repository:
+Both modules build, install, and are accepted by Basecamp. Basecamp is
+launchable against a local profile with one command:
 
 ```bash
-cargo install --git https://github.com/logos-co/logos-scaffold \
-  --rev d4b15ff7ad4e97fd987b9d1216f6e80cb750106e \
-  --root "$HOME/.local" --locked
+tools/load.sh            # profile "creator"
+tools/load.sh alice      # any profile
+tools/load.sh creator --fresh
 ```
 
-`d4b15ff` is the commit `CLAUDE.md` pins. There is no cargo on PATH either, so
-prefix with the Nix toolchain:
+Then **open Collect from the Basecamp shell** — that is what loads
+`collect_ui`, which loads `collect_core`. Modules are loaded on demand, not at
+startup.
 
-```bash
-export PATH="$(ls -d /nix/store/*-rustc-1.89.0/bin | head -1):$(ls -d /nix/store/*-cargo-1.89.0/bin | head -1):$PATH"
+## `lgs` is not needed
+
+A previous `lgs basecamp setup` left everything in the Nix store, and
+`tools/load.sh` uses it directly:
+
+| | |
+| --- | --- |
+| Basecamp | `~/Library/Caches/logos-scaffold/basecamp/<rev>/app-result/bin/LogosBasecamp` |
+| `lgpm` | `.../lgpm-result/bin/lgpm` (`pre-release-d3af297`) |
+
+`lgs` itself is gone (it lived in `~/.cargo/bin`). Rebuilding it needs
+`cargo install --git`, which this environment refuses as external code — but
+nothing here depends on it any more.
+
+## The variant trap
+
+This cost the most time, and it bites from both directions.
+
+| Attribute | Variant it produces |
+| --- | --- |
+| `.#lgx` | `darwin-arm64-dev` |
+| `.#lgx-portable` | `darwin-arm64` |
+
+The scaffold-pinned basecamp (`packages.app`, run as `bin/LogosBasecamp`) and
+the pinned `lgpm` both speak **`darwin-arm64-dev`**, so `.#lgx` is the right
+one here.
+
+The `0.3.0` tag's `bin-macos-app` is the opposite — it accepts only
+`[darwin-arm64, darwin-aarch64]`:
+
+> module 'collect_core' ... was installed for variant 'darwin-arm64-dev'
+> which is not supported on this platform and will not be loadable
+
+and feeding it the portable build instead just moves the failure to install
+time, because `lgpm` then refuses the package it cannot run:
+
+> Package does not contain variant for platform: darwin-arm64-dev
+> (package provides: darwin-arm64)
+
+`lgpm --platform darwin-arm64` does **not** override this in the dev build. The
+only combination that works is the pinned pair plus `.#lgx`. This is the
+`lgpm` ↔ `bin-macos-app` alignment problem `lgs basecamp docs` alludes to.
+
+The confirming evidence: the Open Labbook project in `~/development/logos` has
+`olb_core`, `olb_ui`, `storage_module`, `delivery_module` and the two RLN
+modules all installed as `darwin-arm64-dev`, and they load.
+
+## Verified
+
+- `lgpm install` accepts both packages — content hashes validate, only an
+  "unsigned" warning. Dependency graph resolves: `deps collect_ui` →
+  `collect_core`.
+- Basecamp launches against the profile, reports the right base data
+  directory, and raises **no** variant or validation complaint about either
+  module.
+- The plugin exports the whole module C ABI: `logos_module_install`,
+  `_dispatch`, `_get_methods`, `_get_protocol_version`, `_accept_token`,
+  `_accept_inbound_token`, `_grant_host_services`, `_about_to_unload`. arm64,
+  with 63 of our own Rust symbols in it.
+
+## Not verified
+
+**No method has been called across the real ABI.** Loading is on demand and
+needs a click in the shell, which this environment cannot do — computer-use is
+not set up here.
+
+Running the module standalone does not work around that, and should not:
+
+```
+logos_host --name collect_core --path .../collect_core_plugin.dylib ...
+  [critical] No auth token received from source: stdin
+  @logos-load-status failed no auth token arrived on stdin
 ```
 
-(That is rustc 1.89 from the Nix store, not the 1.93 you had. If `lgs` needs a
-newer toolchain it will say so, and then rustup is the shorter path.)
+Every module needs a token issued by `capability_module`'s registry. That is
+the security model doing its job, and forging one is not a test.
 
-## Then, in order
+## What to try once Collect is open
 
-```bash
-lgs basecamp setup
-```
-
-Pins the basecamp repo, builds `basecamp` + `lgpm`, and seeds the `alice` /
-`bob` profile directories. **This is the heavy step**: `CLAUDE.md` says about
-5 GB free memory, and the docs add that evaluating the basecamp flake alone
-"needs several GB of RAM". This machine has 16 GB with ~4 GB free, so it may
-be tight — close what you can first.
-
-```bash
-lgs basecamp modules          # or trust the hand-written [modules] table
-lgs basecamp install
-lgs basecamp launch creator
-```
-
-`scaffold.toml` is already written, with both modules and all four SPEC §8
-profiles. It deliberately omits the `[repos.*]` pins so `setup` can own them.
-If `lgs` rejects the file, move it aside, run `lgs init`, and copy the
-`[modules]` and `[basecamp.profiles]` sections across.
-
-## What to check first, once it loads
-
-Start with `collect_core` alone — it is a core module and loads without the
-UI. Basecamp's Module Inspector lists its methods and has a **Call** button,
-so the first real ABI test needs no UI at all:
+`collect_core` has 13 methods; four of them cover the whole stack, and the
+Module Inspector has a **Call** button:
 
 | Method | Request | Expect |
 | --- | --- | --- |
-| `session_capabilities` | — | `{"ok":true,"data":{...,"storage":false,"delivery":false}}` |
+| `session_capabilities` | — | `{"ok":true,...,"storage":false,"delivery":false}` |
 | `geo_round` | `{"lat":12.97712,"lon":77.59581}` | `lat 12.975`, `lon 77.595` |
 | `experiments_parse_link` | `{"link":"logos-collect://exp/q7k2m3x4w3b5n6tz?m=logos:abc"}` | id, manifest, topic |
 | `documents_validate` | `{"document": <examples/submission.json>}` | `valid: true` |
 
-Those four cover the envelope, a pure computation, string handling and the
-embedded contract. If `session_capabilities` answers at all, the trait, the
-derived `.lidl`, the generated scaffold and the JSON convention are all
-working end to end.
+If `session_capabilities` answers at all, the trait, the derived `.lidl`, the
+generated scaffold and the JSON envelope all work end to end.
 
-Then `collect_ui`, whose backend calls `modules().collect_core.call(...)` — if
-its `coreReady` PROP goes true, module-to-module dispatch works.
+For the UI: `collect_ui`'s `coreReady` PROP going true means module-to-module
+dispatch through `modules().collect_core` works.
 
-## Known unknowns that only a running node settles
+## Two things worth fixing on this machine
+
+**You are not a trusted Nix user.** Two consequences, both silent:
+
+- Your `~/.config/nix/nix.conf` download-timeout tuning is ignored
+  (`ignoring the client-specified setting 'stalled-download-timeout'`), so the
+  ISP workaround you wrote is not in effect for daemon builds.
+- Basecamp's flake declares `extra-substituters` and
+  `extra-trusted-public-keys` — its **binary cache** — and Nix ignores those
+  too. Anything not already in the store gets built from source rather than
+  downloaded.
+
+Either add yourself to `trusted-users` in `/etc/nix/nix.conf`, or move those
+settings there.
+
+**`~/.zshenv` sources `~/.cargo/env`, which no longer exists**, so every shell
+prints an error. Remove the line, or reinstall rustup.
+
+## Still open
 
 - **Q9 — RLN.** `logos.test` needs a funded RLN membership before a node
-  starts. If a seeded profile does not come with one, the submitter flow in
-  SPEC §3.2 cannot work there at all. This is the first thing worth checking
-  after a profile launches.
-- **Q8 — persistence.** `instance_persistence_path` is the right directory,
-  but `lgs basecamp launch` scrubs the profile tree on every invocation by
-  design. For the §8 test that restarts the creator, hand-launch Basecamp with
-  `--user-dir` pointing outside `.scaffold/basecamp/profiles/`.
-- Whether `.#lgx`'s `darwin-arm64-dev` variant is what `lgpm` wants to install,
-  or whether a release variant is needed.
+  starts. The Open Labbook profile has `liblogos_rln_module` and
+  `liblogos_lez_rln_module` installed, which suggests the pieces exist on this
+  machine — worth checking whether that profile has a funded membership before
+  assuming Collect's submitters cannot announce.
+- **Q12** — whether `collect_ui` keeps its C++ backend. Now that the `.lidl`
+  exists, the `ui-qml` route would let QML call the 13 methods with no C++ in
+  between.

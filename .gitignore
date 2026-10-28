@@ -22,3 +22,6 @@ modules/*/rust-lib/target/
 modules/*/rust-lib/core/target/
 result
 result-*
+
+# Local basecamp profiles created by tools/load.sh
+.logos/
