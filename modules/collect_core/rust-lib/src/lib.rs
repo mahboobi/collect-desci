@@ -70,6 +70,14 @@ pub trait CollectCoreModule: Send + 'static {
     /// Pull the experiment id, manifest CID and Delivery topic out of a link.
     fn experiments_parse_link(&mut self, request: String) -> String;
 
+    /// The view model for an experiment opened from a link: the manifest and
+    /// the protocol documents it names. Needs COLLECT_FIXTURES=1 until
+    /// Storage is wired.
+    fn experiments_open(&mut self, request: String) -> String;
+
+    /// One protocol document by id.
+    fn protocols_get(&mut self, request: String) -> String;
+
     /// Call any method by its SPEC section 6 name, e.g. `submissions.validate`.
     /// Lets the UI hold one call site, and lets `logoscore call` reach a method
     /// this trait has not named yet.
@@ -161,6 +169,14 @@ impl CollectCoreModule for Collect {
 
     fn experiments_parse_link(&mut self, request: String) -> String {
         api::experiments_parse_link(&request)
+    }
+
+    fn experiments_open(&mut self, request: String) -> String {
+        api::experiments_open(&request)
+    }
+
+    fn protocols_get(&mut self, request: String) -> String {
+        api::protocols_get(&request)
     }
 
     fn call(&mut self, method: String, request: String) -> String {

@@ -16,6 +16,31 @@ use crate::{canonical, fields, geo, ids, indexer, media, schema, sign};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
+/// The example documents, embedded.
+///
+/// SPEC section 6: with `COLLECT_FIXTURES=1` the read methods return
+/// `examples/*.json`. They are compiled in rather than read from disk because
+/// the Nix build's source root is the module — the same reason the contract is
+/// copied in — and because a module that reads the repository at runtime would
+/// not work once installed into a profile.
+///
+/// `examples/` stays the source of truth; `fixtures_match_the_repository`
+/// fails if these drift.
+mod fixture {
+    pub const EXPERIMENT: &str = include_str!("../fixtures/experiment.json");
+    pub const PROTOCOL: &str = include_str!("../fixtures/protocol.json");
+    pub const SUBMISSION: &str = include_str!("../fixtures/submission.json");
+    pub const INDEX: &str = include_str!("../fixtures/index.json");
+}
+
+/// Is this build serving fixtures rather than live data?
+///
+/// Reads `COLLECT_FIXTURES` from the environment, so one binary does both and
+/// the UI does not need to know which it is talking to.
+pub fn fixtures_enabled() -> bool {
+    std::env::var("COLLECT_FIXTURES").map(|v| v == "1").unwrap_or(false)
+}
+
 /// Error codes a caller may branch on. Kept short and stable: the UI shows
 /// `message`, but anything it *acts* on keys off `code`.
 pub mod code {
@@ -27,6 +52,8 @@ pub mod code {
     pub const MEDIA: &str = "media";
     pub const REJECTED: &str = "rejected";
     pub const UNKNOWN_METHOD: &str = "unknown_method";
+    /// The call is understood but its transport is not built yet.
+    pub const NOT_WIRED: &str = "not_wired";
 }
 
 fn ok(data: Value) -> String {
@@ -617,6 +644,77 @@ pub fn experiments_parse_link(raw: &str) -> String {
     }
 }
 
+/// `experiments.open` — the view model S1 needs for a link.
+///
+/// In fixtures mode this answers from the embedded documents and ignores the
+/// link. Live, it would fetch the manifest from the CID in the link and then
+/// each protocol it names; the shape returned here is what that will produce,
+/// so the UI does not change when the fetch becomes real.
+pub fn experiments_open(_raw: &str) -> String {
+    if !fixtures_enabled() {
+        return err(
+            code::NOT_WIRED,
+            "opening a link needs Logos Storage, which is not wired yet (SPEC Q9/Q12). \
+             Set COLLECT_FIXTURES=1 to work against the example documents.",
+        );
+    }
+
+    let experiment: Value = match serde_json::from_str(fixture::EXPERIMENT) {
+        Ok(v) => v,
+        Err(e) => return err(code::INVALID_DOCUMENT, format!("embedded experiment: {e}")),
+    };
+    let protocol: Value = match serde_json::from_str(fixture::PROTOCOL) {
+        Ok(v) => v,
+        Err(e) => return err(code::INVALID_PROTOCOL, format!("embedded protocol: {e}")),
+    };
+
+    // Validate on the way out, not just on the way in. A fixture that drifted
+    // from the contract would otherwise reach the form renderer.
+    for (label, doc, kind) in [
+        ("experiment", &experiment, schema::Kind::Experiment),
+        ("protocol", &protocol, schema::Kind::Protocol),
+    ] {
+        let errors = schema::errors_as(doc, kind);
+        if !errors.is_empty() {
+            return err(
+                code::INVALID_DOCUMENT,
+                format!("embedded {label} does not validate: {}", errors.join("; ")),
+            );
+        }
+    }
+
+    ok(json!({
+        "experiment": experiment,
+        // Only the protocols we actually hold a document for. The example
+        // manifest names three; one fixture exists.
+        "protocols": [protocol],
+        "fixtures": true,
+    }))
+}
+
+/// `protocols.get` — one protocol document by id.
+pub fn protocols_get(raw: &str) -> String {
+    let request = match body(raw) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let wanted = match field_str(&request, "protocolId") {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    if !fixtures_enabled() {
+        return err(code::NOT_WIRED, "fetching a protocol needs Logos Storage, which is not wired yet");
+    }
+    let protocol: Value = match serde_json::from_str(fixture::PROTOCOL) {
+        Ok(v) => v,
+        Err(e) => return err(code::INVALID_PROTOCOL, format!("embedded protocol: {e}")),
+    };
+    if protocol.get("id").and_then(Value::as_str) != Some(wanted) {
+        return err(code::BAD_REQUEST, format!("no protocol `{wanted}` in this build"));
+    }
+    ok(json!({ "protocol": protocol }))
+}
+
 /// `session.capabilities` — what this build can actually do.
 ///
 /// Honest rather than aspirational: the Storage and Delivery methods are not
@@ -631,6 +729,7 @@ pub fn session_capabilities(_raw: &str) -> String {
         "indexer": true,
         "storage": false,
         "delivery": false,
+        "fixtures": fixtures_enabled(),
         "heic": false,
         "schema": "collect.schema.json",
         "app": concat!("collect/", env!("CARGO_PKG_VERSION")),
@@ -651,6 +750,8 @@ pub fn dispatch(method: &str, raw: &str) -> String {
         "index.page" => index_page(raw),
         "geo.round" => geo_round(raw),
         "experiments.parseLink" => experiments_parse_link(raw),
+        "experiments.open" => experiments_open(raw),
+        "protocols.get" => protocols_get(raw),
         "session.capabilities" => session_capabilities(raw),
         other => err(code::UNKNOWN_METHOD, format!("no method `{other}`")),
     }
@@ -1324,6 +1425,84 @@ mod tests {
         assert_eq!(out["delivery"], json!(false));
         assert_eq!(out["documents"], json!(true));
         assert_eq!(out["media"], json!(true));
+    }
+
+    // ---- fixtures mode ----
+
+    /// Serialise the env change: these tests mutate process-global state.
+    static FIXTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_fixtures<T>(on: bool, body: impl FnOnce() -> T) -> T {
+        let _guard = FIXTURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var("COLLECT_FIXTURES").ok();
+        // SAFETY: serialised by FIXTURE_LOCK, and restored below.
+        unsafe {
+            if on {
+                std::env::set_var("COLLECT_FIXTURES", "1");
+            } else {
+                std::env::remove_var("COLLECT_FIXTURES");
+            }
+        }
+        let out = body();
+        unsafe {
+            match previous {
+                Some(v) => std::env::set_var("COLLECT_FIXTURES", v),
+                None => std::env::remove_var("COLLECT_FIXTURES"),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn fixtures_match_the_repository() {
+        // examples/ is the source of truth; the module carries copies only
+        // because the Nix build cannot see above its own root.
+        assert_eq!(fixture::EXPERIMENT, EXPERIMENT, "fixtures/experiment.json has drifted");
+        assert_eq!(fixture::PROTOCOL, PROTOCOL, "fixtures/protocol.json has drifted");
+        assert_eq!(fixture::SUBMISSION, SUBMISSION, "fixtures/submission.json has drifted");
+        assert_eq!(fixture::INDEX, INDEX, "fixtures/index.json has drifted");
+    }
+
+    #[test]
+    fn experiments_open_serves_the_embedded_documents() {
+        let out = with_fixtures(true, || data("experiments.open", json!({ "link": "ignored" })));
+        assert_eq!(out["fixtures"], json!(true));
+        assert_eq!(out["experiment"]["id"], json!("q7k2m3x4w3b5n6tz"));
+        let protocols = out["protocols"].as_array().unwrap();
+        assert_eq!(protocols.len(), 1);
+        assert_eq!(protocols[0]["id"], json!("wildlife-sighting"));
+        // The form renderer reads these, so the field list has to arrive.
+        assert_eq!(protocols[0]["fields"].as_array().unwrap().len(), 8);
+    }
+
+    #[test]
+    fn experiments_open_refuses_when_not_in_fixtures_mode() {
+        // Better to say the transport is missing than to answer with fixtures
+        // a caller did not ask for.
+        let out = with_fixtures(false, || call("experiments.open", json!({ "link": "x" })));
+        assert_eq!(out["ok"], json!(false));
+        assert_eq!(out["error"]["code"], json!(code::NOT_WIRED));
+    }
+
+    #[test]
+    fn protocols_get_returns_a_named_protocol() {
+        let out = with_fixtures(true, || {
+            data("protocols.get", json!({ "protocolId": "wildlife-sighting" }))
+        });
+        assert_eq!(out["protocol"]["id"], json!("wildlife-sighting"));
+    }
+
+    #[test]
+    fn protocols_get_rejects_an_unknown_id() {
+        let out = with_fixtures(true, || call("protocols.get", json!({ "protocolId": "nest-monitoring" })));
+        assert_eq!(out["ok"], json!(false));
+        assert_eq!(out["error"]["code"], json!(code::BAD_REQUEST));
+    }
+
+    #[test]
+    fn capabilities_reports_whether_fixtures_are_on() {
+        assert_eq!(with_fixtures(true, || data("session.capabilities", json!({})))["fixtures"], json!(true));
+        assert_eq!(with_fixtures(false, || data("session.capabilities", json!({})))["fixtures"], json!(false));
     }
 
     // ---- media ----

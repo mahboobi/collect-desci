@@ -17,4 +17,10 @@ void CollectUiBackend::onContextReady()
     const QString reported = modules().collect_core.session_capabilities();
     setCapabilities(reported);
     setCoreReady(!reported.isEmpty());
+
+    // Pull the experiment straight away. With COLLECT_FIXTURES=1 this is the
+    // embedded example; live it will be the manifest fetched from the link.
+    // Either way the view reads the same shape, so nothing above here changes
+    // when the fetch becomes real.
+    setDocuments(modules().collect_core.experiments_open(QStringLiteral("{}")));
 }

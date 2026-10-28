@@ -78,6 +78,11 @@ export TMPDIR="/tmp/cc-$PROFILE"
 export XDG_RUNTIME_DIR="$TMPDIR"
 mkdir -p "$TMPDIR" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
 
+# SPEC section 6: COLLECT_FIXTURES=1 makes collect_core's read methods answer
+# from the embedded example documents. Modules are spawned as child processes
+# of basecamp, so they inherit this.
+export COLLECT_FIXTURES="${COLLECT_FIXTURES:-1}"
+
 LOG="$PDIR/basecamp.log"
 echo "    log: $LOG"
 echo "    open Collect from the shell to load collect_ui (which loads collect_core)."

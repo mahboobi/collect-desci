@@ -11,6 +11,27 @@ import "screens"
 Item {
     id: app
 
+    // The typed replica for this module's own backend. Null until the view
+    // module is ready, which is why every read below is guarded.
+    readonly property var backend: logos.module("collect_ui") // qmllint disable unqualified
+
+    Connections {
+        target: app.backend
+        enabled: app.backend !== null
+        // documents is a .rep PROP, so this fires whenever the backend
+        // pushes a new manifest — including a later one arriving over
+        // Delivery.
+        function onDocumentsChanged() {
+            if (app.backend.documents && app.backend.documents !== "{}")
+                Core.applyOpenEnvelope(app.backend.documents);
+        }
+    }
+
+    Component.onCompleted: {
+        if (app.backend && app.backend.documents && app.backend.documents !== "{}")
+            Core.applyOpenEnvelope(app.backend.documents);
+    }
+
     // Lets the harness and a test place themselves inside or outside the
     // experiment window without waiting for a real date.
     property double nowMs: Date.now()
@@ -41,7 +62,9 @@ Item {
     Text {
         anchors.centerIn: parent
         visible: !Core.ready || !Core.experimentDoc
-        text: Core.ready ? "No experiment loaded." : "Loading\u2026"
+        text: !app.backend
+              ? "Connecting to collect_core\u2026"
+              : (Core.ready ? "No experiment loaded." : "Loading\u2026")
         font.family: Theme.sans
         font.pixelSize: Theme.body
         color: Theme.ink3

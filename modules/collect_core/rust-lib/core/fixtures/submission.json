@@ -1,0 +1,42 @@
+{
+  "schema": "collect/submission@1",
+  "id": "0192f7a4-6b2e-7c1d-9a3f-5e8b2c4d6f10",
+  "experiment": "q7k2m3x4w3b5n6tz",
+  "protocol": {
+    "id": "wildlife-sighting",
+    "version": 2
+  },
+  "submitter": {
+    "key": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+    "name": "Nisha Kumar"
+  },
+  "submitted_at": "2026-10-28T07:50:12+05:30",
+  "values": {
+    "photos": [
+      {
+        "cid": "logos:zb2rhPhotoA",
+        "sha256": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "mime": "image/jpeg",
+        "bytes": 3355443,
+        "width": 4032,
+        "height": 3024
+      }
+    ],
+    "category": "birds",
+    "species": "Indian peafowl",
+    "count": 3,
+    "location": {
+      "lat": 12.97712,
+      "lon": 77.59581,
+      "accuracy_m": 12,
+      "method": "photo",
+      "rounded": false
+    },
+    "observed": "2026-10-28T07:42:00+05:30",
+    "behaviour": [
+      "feeding"
+    ]
+  },
+  "app": "collect/0.1.0",
+  "sig": "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab"
+}

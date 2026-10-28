@@ -23,6 +23,12 @@ class CollectUi
     // Whether collect_core answered at all.
     PROP(bool coreReady=false READONLY)
 
+    // The experiment and its protocols, as collect_core returns them from
+    // experiments.open. A PROP rather than a slot because the view wants it
+    // on arrival, not on request — and when a newer manifest lands over
+    // Delivery, pushing it here is how the screens find out.
+    PROP(QString documents="{}" READONLY)
+
     // The generic entry point: a SPEC section 6 method name plus its JSON
     // request. One slot rather than thirteen, because the UI already holds
     // the method names in Core.qml and a second copy here would be a second

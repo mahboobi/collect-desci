@@ -37,8 +37,33 @@ QtObject {
     signal loaded()
     signal failed(string reason)
 
-    // Called by the harness, and by whatever binds collect_core once the call
-    // shape is settled (SPEC Q12).
+    // Take an `experiments.open` envelope as collect_core returns it.
+    //
+    // Reads the envelope rather than trusting it: a failure arrives the same
+    // way as success, and the screens need to tell the difference.
+    function applyOpenEnvelope(text) {
+        var envelope;
+        try {
+            envelope = JSON.parse(text);
+        } catch (e) {
+            core.failed("experiments.open did not return JSON: " + e);
+            return;
+        }
+        if (!envelope.ok) {
+            var detail = envelope.error ? envelope.error.message : "unknown error";
+            core.failed(detail);
+            return;
+        }
+        var data = envelope.data;
+        core.seed({
+            experiment: data.experiment,
+            // The screens ask for one protocol at a time; keep them by id.
+            protocol: data.protocols && data.protocols.length > 0 ? data.protocols[0] : null
+        });
+        core.fixtures = data.fixtures === true;
+    }
+
+    // Called by the harness, and by the backend once collect_core answers.
     function seed(docs) {
         if (docs.experiment !== undefined)
             core.experimentDoc = docs.experiment;

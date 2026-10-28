@@ -1,0 +1,38 @@
+{
+  "schema": "collect/experiment@1",
+  "id": "q7k2m3x4w3b5n6tz",
+  "version": 4,
+  "creator": {
+    "key": "3a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f21",
+    "name": "Nisha Kumar"
+  },
+  "title": "Urban wildlife sightings",
+  "description": "We are mapping which animals live around four lakes and parks in central Bengaluru. Every sighting helps us compare lake edges with park lawns. Submissions are public and help anyone studying urban wildlife.",
+  "starts_at": "2026-10-12T00:00:00+05:30",
+  "ends_at": "2026-12-31T23:59:59+05:30",
+  "timezone": "Asia/Kolkata",
+  "protocols": [
+    {
+      "id": "wildlife-sighting",
+      "version": 2,
+      "cid": "logos:zb2rhProtSight2",
+      "status": "open"
+    },
+    {
+      "id": "nest-monitoring",
+      "version": 1,
+      "cid": "logos:zb2rhProtNest1",
+      "status": "open"
+    },
+    {
+      "id": "camera-trap-upload",
+      "version": 1,
+      "cid": "logos:zb2rhProtCam1",
+      "status": "closed"
+    }
+  ],
+  "index": "logos:zb2rhIndexP2",
+  "prev": "logos:zb2rhManifestV3",
+  "created_at": "2026-10-26T10:05:00+05:30",
+  "sig": "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab"
+}

@@ -1,0 +1,155 @@
+{
+  "schema": "collect/protocol@1",
+  "id": "wildlife-sighting",
+  "version": 2,
+  "experiment": "q7k2m3x4w3b5n6tz",
+  "name": "Wildlife sighting",
+  "instructions": "Record any animal you see inside the study area. Photograph it before you approach, and never disturb nests or roosts.\nOne submission per group of the same species.",
+  "fields": [
+    {
+      "key": "photos",
+      "type": "photo",
+      "label": "Photos",
+      "help": "Up to 5 clear photos of the animal.",
+      "required": true,
+      "config": {
+        "min": 1,
+        "max": 5,
+        "max_mb_each": 25,
+        "fill_from_exif": [
+          "location",
+          "datetime"
+        ]
+      }
+    },
+    {
+      "key": "category",
+      "type": "choice",
+      "label": "Category",
+      "required": true,
+      "config": {
+        "options": [
+          {
+            "value": "birds",
+            "label": "Birds"
+          },
+          {
+            "value": "mammals",
+            "label": "Mammals"
+          },
+          {
+            "value": "reptiles",
+            "label": "Reptiles"
+          },
+          {
+            "value": "amphibians",
+            "label": "Amphibians"
+          },
+          {
+            "value": "insects",
+            "label": "Insects"
+          },
+          {
+            "value": "other",
+            "label": "Other"
+          }
+        ]
+      }
+    },
+    {
+      "key": "species",
+      "type": "text",
+      "label": "Species, if you know it",
+      "help": "Common or scientific name.",
+      "required": false,
+      "config": {
+        "max_length": 120
+      }
+    },
+    {
+      "key": "count",
+      "type": "number",
+      "label": "How many",
+      "required": true,
+      "config": {
+        "min": 1,
+        "integer": true,
+        "unit": "individuals"
+      }
+    },
+    {
+      "key": "location",
+      "type": "location",
+      "label": "Location",
+      "help": "Where you saw it, not where you are now.",
+      "required": true,
+      "config": {
+        "methods": [
+          "photo",
+          "map",
+          "manual"
+        ],
+        "max_accuracy_m": 50,
+        "store": "exact"
+      }
+    },
+    {
+      "key": "observed",
+      "type": "datetime",
+      "label": "Date and time",
+      "required": true,
+      "config": {
+        "fill_from": [
+          "photo",
+          "now"
+        ],
+        "no_future": true
+      }
+    },
+    {
+      "key": "behaviour",
+      "type": "multi",
+      "label": "What was it doing?",
+      "help": "Select all that apply.",
+      "required": false,
+      "config": {
+        "options": [
+          {
+            "value": "feeding",
+            "label": "Feeding"
+          },
+          {
+            "value": "flying",
+            "label": "Flying"
+          },
+          {
+            "value": "nesting",
+            "label": "Nesting"
+          },
+          {
+            "value": "resting",
+            "label": "Resting"
+          },
+          {
+            "value": "calling",
+            "label": "Calling"
+          }
+        ]
+      }
+    },
+    {
+      "key": "notes",
+      "type": "longtext",
+      "label": "Notes",
+      "help": "Habitat, weather, anything unusual.",
+      "required": false,
+      "config": {
+        "max_length": 2000
+      }
+    }
+  ],
+  "allow_multiple": true,
+  "allow_drafts": true,
+  "created_at": "2026-10-26T10:00:00+05:30",
+  "sig": "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab"
+}
