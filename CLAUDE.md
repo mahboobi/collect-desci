@@ -30,11 +30,14 @@ collect/
 ## Platform constraints
 
 1. QML UI modules are sandboxed: no network, no files outside the module. All Storage, Delivery, file and crypto work happens in `collect_core`; the UI calls it with `logos.callModule`.
-2. Logos Storage has no listing and no paid persistence. The creator's node pins every document of its experiments; submitters pin their own. The index pages on Storage are the durable list of submissions.
-3. Delivery Store is temporary. Submitters re-announce until they get a receipt; the creator re-publishes `head` every 10 minutes.
+2. Logos Storage has no network-wide listing and no paid persistence. There is **no pin operation**: keeping a document means its bytes are in local storage, `remove()` is never called, and `advertise` stays on. `manifests()` does list what the local node holds. `remove()` deletes locally only — the DHT record is not withdrawn and other nodes keep what they fetched, so nothing published is ever retractable. The index pages on Storage are the durable list of submissions.
+3. Delivery Store is temporary and its retention is operator-configured. Messages cap out at ~150 KiB. Submitters re-announce until they get a receipt; the creator re-publishes `head` every 10 minutes. **`logos.test` requires a funded RLN membership before a node starts** (600 s epochs) — see SPEC.md Q9, which gates submitter-side announcements.
 4. Logos Chat addresses change on every launch; do not use Chat for anything here.
-5. `lgs basecamp launch <profile>` wipes the profile. For tests that need persistence, run Basecamp with `--user-dir`.
+5. `lgs basecamp launch <profile>` wipes the profile, including basecamp's per-module `module_data/`. A module needing state across launches must not keep it there (SPEC.md Q8). For tests that need persistence, hand-launch Basecamp with `--user-dir` pointing outside the scaffold profile tree.
 6. Nix package builds see only git-tracked files: `git add` new files before `nix build .#lgx`.
+7. Each sub-flake must expose `packages.<system>.lgx`, and every transitive `logos-module-builder` input must `follows` the top-level pin — otherwise `flake.lock` carries two and the stale one wins under scaffold's `--override-input`. Sibling inputs must use the single-line `path:../<sibling>` form; the scaffold parser is line-level.
+8. A `ui_qml` package must ship a 256x256 PNG icon at `assets/icon.png`, and `main` / `view` in `metadata.json` must name files that exist in the built variant. Validation rejects both.
+9. On macOS the module socket path is capped at 104 bytes, so keep `runtime_dir` short (`/tmp/lgs-<profile>` is the scaffold default).
 
 ## Rules
 
@@ -49,7 +52,7 @@ collect/
 
 ## Do not
 
-- Do not invent Logos APIs. Read first:
+- Do not invent Logos APIs. `docs/api-verification.md` records what was checked on 28 October 2026 and what is still open. Read first:
   - Storage: https://logos-co.github.io/logos-storage-module/latest/api_reference.html
   - Delivery: https://logos-co.github.io/logos-delivery-module/latest/pages/api_reference.html
   - Core modules: https://docs.logos.co/core/build-modules/build-and-run-a-logos-core-module

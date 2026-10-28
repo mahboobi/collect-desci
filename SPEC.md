@@ -29,7 +29,7 @@ Everything is a JSON document on **Logos Storage**, addressed by CID. Documents 
 | `collect/index@1` | Creator | One page (up to 1,000 entries) listing received submissions, hidden keys, and `prev` page CID | No. New pages link back to earlier ones. |
 | Media files | Submitter | Photos, with all metadata removed | No |
 
-**Messaging.** Storage has no "list" or "notify" operation, so documents are announced on one **Logos Delivery** content topic per experiment: `/collect/1/exp-<experimentId>/json`. Messages (schemas in `$defs/announcement`):
+**Messaging.** Storage has no network-wide "list" and no "notify" operation, so documents are announced on one **Logos Delivery** content topic per experiment: `/collect/1/exp-<experimentId>/json`. (Verified: `manifests()` does list what the *local* node holds — see `docs/api-verification.md` Q2.) Messages (schemas in `$defs/announcement`):
 
 | Kind | From | When | Purpose |
 | --- | --- | --- | --- |
@@ -38,6 +38,13 @@ Everything is a JSON document on **Logos Storage**, addressed by CID. Documents 
 | `receipt` | Creator node | After accepting a submission | Lets the submitter show "Received by creator" |
 
 Delivery Store keeps messages only temporarily, which is why submitters re-announce and the creator publishes the index to Storage. **The index on Storage is the durable list; Delivery is only the doorbell.**
+
+**Verified against the real modules** (28 October 2026, `docs/api-verification.md`). Three things in this section were wrong and one is a blocker:
+
+- There is no pin operation. "The creator's node pins every document" means: the bytes are in its local storage, it never calls `remove()`, and `advertise` stays on. Nothing reserves space or guarantees retention.
+- `remove()` exists and deletes from **local** storage, so "nothing can be deleted" is wrong as written. It does not make anything retractable: the DHT record is not withdrawn and other nodes keep what they fetched. A published exact coordinate still cannot be recalled, which is what `rounded_1km` and hide-rather-than-delete depend on.
+- Announcements carry a ~150 KiB ceiling (store sync refuses more, whatever `--max-msg-size` says). Collect's announcements are far smaller, so this only confirms that documents go to Storage and only CIDs go over Delivery.
+- **Blocker: `logos.test` requires a funded RLN membership before a node starts.** §1's "any Basecamp user with the link can submit" and §3.2's submitter-publishes-an-announcement do not hold there, and obtaining a membership needs testnet tokens, which `CLAUDE.md` rules out for v1. Open question Q9 below.
 
 **The link.** `logos-collect://exp/<experimentId>?m=<manifestCid>`. `experimentId` = first 10 bytes of SHA-256(creator key ‖ random nonce), base32 lower-case. On open, the module fetches the manifest from `m`, subscribes to the topic, and switches to a newer manifest when a valid creator-signed `head` arrives (same experiment id, higher version, same creator key).
 
@@ -61,7 +68,7 @@ Delivery Store keeps messages only temporarily, which is why submitters re-annou
 
 ### 3.3 Creator: receive, view and export
 For each `submission` announcement, the creator node:
-1. fetches the CID (gives up after 10 min, retries on the next announcement);
+1. fetches the CID (gives up after 10 min, retries on the next announcement). Storage takes no timeout parameter, so this is our own timer waiting on `storageDownloadDone`;
 2. checks the signature, schema, protocol id and version, field validation (§4), media CIDs fetchable, sizes;
 3. checks the time window: the receive time is between `starts_at` and `ends_at`. If drafts are allowed, it also accepts a receive time up to 7 days after `ends_at` when `submitted_at` is inside the window;
 4. checks the rate limit (200 per submitter key per day, configurable) and hidden keys;
@@ -69,7 +76,7 @@ For each `submission` announcement, the creator node:
 
 Invalid submissions are ignored and logged locally; they are never added to the index.
 
-**C4 Results:** summary cards (submissions, submitters, storage size and copies, waiting to be picked up), one tab per protocol, a table whose columns follow the protocol's fields, search, View (full submission with photos), Copy link, Export (CSV per protocol + media folder + JSON of all documents), submissions per day (last 14 days), most active submitters, hidden submitters with Unhide.
+**C4 Results:** summary cards (submissions, submitters, storage size, waiting to be picked up — **not** copies: no API reports a replication count, so the card shows only copies we know of, or drops the number), one tab per protocol, a table whose columns follow the protocol's fields, search, View (full submission with photos), Copy link, Export (CSV per protocol + media folder + JSON of all documents), submissions per day (last 14 days), most active submitters, hidden submitters with Unhide.
 
 **Hide a submitter** (from View): their key goes into `hidden_keys` on the next index page. Their files stay on Storage (nothing can be deleted), but they are dropped from the index, results and exports.
 
@@ -106,7 +113,9 @@ Every field has `key` (stable, `^[a-z][a-z0-9_]{0,39}$`), `label`, optional `hel
 
 ## 6. `collect_core` API (proposed)
 
-Same conventions as Open Labbook: `logos.callModule("collect_core", method, [jsonString])` returns `{"ok": true, "data": …}` or `{"ok": false, "error": {"code", "message"}}`. Long jobs return `{job}` and report progress through events. Verify how the module templates expose methods and events before building (Q1).
+Same conventions as Open Labbook: `logos.callModule("collect_core", method, [jsonString])` returns `{"ok": true, "data": …}` or `{"ok": false, "error": {"code", "message"}}`. Long jobs return `{job}` and report progress through events.
+
+**Verified (Q1).** `logos.callModule(name, method, [args])` and `logos.callModuleAsync(name, method, [args], callback)` both exist, and QML always receives a JSON **string**, so this shape works — but the `{ok, data}` envelope is our own convention, not the platform's. The platform contract is typed methods (`int64_t`, `std::string`) on a plain class. Note also that `ui-qml-backend` reaches its *own* backend through a `.rep` interface (`PROP()` / `SLOT()`, bound as `logos.module("collect_ui")`); `callModule` is for reaching a different module, which is how `collect_ui` will call `collect_core`. How a **Rust** module declares methods and events is still undocumented and needs the template source.
 
 | Area | Methods |
 | --- | --- |
@@ -141,6 +150,8 @@ The UI is a **form renderer** driven by the protocol JSON. The wildlife form in 
 
 ## 8. Acceptance tests (scaffold profiles `creator`, `alice`, `bob`, `reader`)
 
+`basecamp setup` seeds only `alice` and `bob`. Declare the other two under `[basecamp.profiles.<name>]` in `scaffold.toml`; unknown profiles are seeded on first launch.
+
 1. `creator` creates an experiment with two protocols and publishes; `alice` opens the link and sees both forms within 10 s.
 2. `alice` submits with a JPEG that has GPS EXIF: location and time prefill; the uploaded photo has no metadata (automated check); `creator` sees the row within 30 s; `alice` sees "Received by creator".
 3. `creator` offline: `bob` submits; `creator` starts 15 min later; the submission appears without `bob` doing anything (re-announce works).
@@ -156,13 +167,18 @@ The UI is a **form renderer** driven by the protocol JSON. The wildlife form in 
 
 ## 9. Open questions
 
-| # | Question | Default until answered |
+Answered 28 October 2026 against the published APIs and `lgs basecamp docs`. Evidence and quotes: `docs/api-verification.md`. Nothing below was verified by running a node — Nix was not installed — so items marked **needs a node** are still open.
+
+| # | Question | Status |
 | --- | --- | --- |
-| Q1 | How do the 0.3.0 `rust` and `ui-qml-backend` templates expose methods, return values and events? | Adapt the API names in §6 to the template |
-| Q2 | Storage API: pin or keep a CID, fetch timeouts, and can we count copies held by other nodes? | Count copies we know about: creator, submitter, mirror |
-| Q3 | Is there a public HTTP gateway for Logos Storage, so the link can be read in a web browser? | Reading needs Basecamp or a Logos node |
-| Q4 | Delivery Store retention, message size limit, and whether RLN membership is needed to publish on testnet | Re-announce every 10 min for up to 7 days |
-| Q5 | Map tiles in QML (network from a core module? offline tiles?) | Placeholder map plus typed coordinates; photo GPS works without a map |
-| Q6 | Optional always-on **mirror** node (headless `collect_core` that pins and re-publishes the index when the creator is offline) | Not in v1; recommend for any experiment that runs for weeks |
-| Q7 | More than one creator per experiment | Not in v1 |
-| Q8 | Spam: is the per-key rate limit enough, given that anyone can make new keys? | Rate limit plus hide; revisit if abused |
+| Q1 | How do the 0.3.0 `rust` and `ui-qml-backend` templates expose methods, return values and events? | **Answered for C++, open for Rust.** Public methods on a plain class are the API, typed (`int64_t`, `std::string`). `logos.callModule(name, method, [args])` and `callModuleAsync(..., cb)` from QML; QML always gets a JSON string. `ui-qml-backend` reaches its own backend via a `.rep` `PROP()`/`SLOT()` interface bound as `logos.module(...)`. The Rust templates exist but their method/event declaration is undocumented — needs the template source, so blocked on Nix. |
+| Q2 | Storage API: pin or keep a CID, fetch timeouts, and can we count copies held by other nodes? | **Answered.** No pin — `setAdvertise()` only controls DHT announcement, and keeping a document means not calling `remove()`. No fetch timeout; use our own timer on `storageDownloadDone`. **No copy count exists**, so the C4 card cannot show one. Bonus: `manifests()` lists local content, which §2 had ruled out. |
+| Q3 | Is there a public HTTP gateway for Logos Storage, so the link can be read in a web browser? | **Leaning no.** The Storage API is a module API over local IPC with no HTTP read path. Default stands: reading needs Basecamp or a Logos node. |
+| Q4 | Delivery Store retention, message size limit, and whether RLN membership is needed to publish on testnet | **Answered, and it is a blocker — see Q9.** RLN **is** required on `logos.test`: a node needs the RLN modules and a funded membership before `start` passes, with 600 s epochs. Effective message size ceiling ~150 KiB. Retention is operator-configured (Store needs PostgreSQL and a policy such as `size:1GB`), so the 7-day re-announce window is our policy, not a guarantee. Better than assumed: `messageReceived` carries `source: "live" | "history"` and Store catch-up is on by default, and `storeQuery` can ask for a time range directly. |
+| Q5 | Map tiles in QML (network from a core module? offline tiles?) | **Unchanged.** Nothing lifts the UI sandbox. Placeholder map plus typed coordinates; photo GPS works without a map. |
+| Q6 | Optional always-on **mirror** node (headless `collect_core` that pins and re-publishes the index when the creator is offline) | Not in v1; recommend for any experiment that runs for weeks. Q8 makes this more attractive, since a mirror would also hold durable state. |
+| Q7 | More than one creator per experiment | Not in v1. |
+| Q8 | **New.** Where does `collect_core` keep state that must survive a relaunch? | **Open, and needs deciding before the spike.** Everything under basecamp's `module_root` — including per-module `module_data/` — is scrubbed on every launch by design: "a module that needs state across launches must not keep it there." The creator's identity key, experiment list and index state all have to outlive a relaunch or it stops being the indexer. `--user-dir` pointing outside the scaffold profile tree is the known workaround for testing, but not an answer for a shipped module. |
+| Q9 | **New.** Does a Basecamp 0.3.0 profile come with a usable RLN membership? | **Open, needs a node, and gates §3.2.** If yes, submitters inherit it and §2 works as written. If no, "any Basecamp user with the link can submit" is false on `logos.test` and v1 has to either drop submitter-side announcements or develop against a preset with RLN off. Acquiring memberships per submitter means testnet tokens, which `CLAUDE.md` rules out for v1. |
+| Q10 | Spam: is the per-key rate limit enough, given that anyone can make new keys? | Rate limit plus hide; revisit if abused. (Was Q8.) RLN, if it does apply to submitters, is itself a per-identity rate limit and partly answers this. |
+| Q11 | **New.** HEIC decoding. | **Open.** The contract allows `image/heic`, but decoding needs a system codec. `collect_core` recognises HEIC and refuses it with its own reason rather than calling it an unknown format. Either find a decoder or drop `image/heic` from the contract. |
