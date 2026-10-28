@@ -96,6 +96,10 @@ pub trait CollectCoreModule: Send + 'static {
     /// version. Saved on this node only.
     fn protocols_save_draft(&mut self, request: String) -> String;
 
+    /// The creator's results table for one form: columns from the protocol's
+    /// fields, rows from the submissions this node holds.
+    fn results_list(&mut self, request: String) -> String;
+
     /// Call any method by its SPEC section 6 name, e.g. `submissions.validate`.
     /// Lets the UI hold one call site, and lets `logoscore call` reach a method
     /// this trait has not named yet.
@@ -247,6 +251,10 @@ impl CollectCoreModule for Collect {
         self.session().save_protocol(&request, now)
     }
 
+    fn results_list(&mut self, request: String) -> String {
+        self.session().results(&request)
+    }
+
     fn call(&mut self, method: String, request: String) -> String {
         // The stateful methods live on Session, which api::dispatch cannot
         // reach — it only knows the pure functions. Routing them here is what
@@ -259,6 +267,7 @@ impl CollectCoreModule for Collect {
             "experiments.get" => self.session().get(&request),
             "experiments.create" => self.session().create(&request, now),
             "protocols.saveDraft" => self.session().save_protocol(&request, now),
+            "results.list" => self.session().results(&request),
             _ => api::dispatch(&method, &request),
         }
     }

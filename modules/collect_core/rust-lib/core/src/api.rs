@@ -76,6 +76,16 @@ pub fn fixture_protocol() -> &'static str {
     fixture::PROTOCOL
 }
 
+/// The embedded example submission.
+pub fn fixture_submission() -> &'static str {
+    fixture::SUBMISSION
+}
+
+/// The embedded example index page.
+pub fn fixture_index() -> &'static str {
+    fixture::INDEX
+}
+
 fn ok(data: Value) -> String {
     json!({ "ok": true, "data": data }).to_string()
 }

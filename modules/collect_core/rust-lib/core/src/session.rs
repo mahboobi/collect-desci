@@ -42,6 +42,10 @@ pub struct Session {
     experiments: Vec<Value>,
     /// Protocol documents, by id.
     protocols: Vec<Value>,
+    /// Submissions this node holds, newest last.
+    submissions: Vec<Value>,
+    /// Index pages, newest last. The durable record of what was received.
+    index_pages: Vec<Value>,
     /// This node's identity. Fixed in fixtures mode so the embedded example
     /// reads as "created by you"; otherwise the real signing key.
     creator_key: String,
@@ -62,6 +66,8 @@ impl Session {
         let mut session = Session {
             experiments: Vec::new(),
             protocols: Vec::new(),
+            submissions: Vec::new(),
+            index_pages: Vec::new(),
             // The example experiment's creator, so the embedded fixture reads
             // as "created by you" and the creator screens have something to
             // open.
@@ -81,6 +87,179 @@ impl Session {
         if let Ok(protocol) = serde_json::from_str::<Value>(api::fixture_protocol()) {
             self.protocols.push(protocol);
         }
+        if let Ok(submission) = serde_json::from_str::<Value>(api::fixture_submission()) {
+            self.submissions.push(submission);
+        }
+        if let Ok(page) = serde_json::from_str::<Value>(api::fixture_index()) {
+            self.index_pages.push(page);
+        }
+    }
+
+    /// `results.list` — the creator's table for one protocol.
+    ///
+    /// Columns follow the protocol's fields, in protocol order, because the
+    /// table is of that form's answers and nothing else can define its shape
+    /// (SPEC 3.3). Hidden submitters are dropped here, so results, the table
+    /// and any export all read through one rule.
+    pub fn results(&self, raw: &str) -> String {
+        let request: Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
+        };
+        let Some(experiment_id) = request.get("experimentId").and_then(Value::as_str) else {
+            return api::envelope_err(api::code::BAD_REQUEST, "`experimentId` is required");
+        };
+        let Some(protocol_id) = request.get("protocolId").and_then(Value::as_str) else {
+            return api::envelope_err(api::code::BAD_REQUEST, "`protocolId` is required");
+        };
+
+        let Some(protocol) = self
+            .protocols
+            .iter()
+            .find(|p| p.get("id").and_then(Value::as_str) == Some(protocol_id))
+        else {
+            return api::envelope_err(
+                api::code::BAD_REQUEST,
+                format!("no protocol `{protocol_id}` on this node"),
+            );
+        };
+
+        let columns: Vec<Value> = match fields::parse_fields(protocol) {
+            Ok(parsed) => parsed
+                .iter()
+                .map(|f| {
+                    // The options travel with the column so a cell can show a
+                    // label rather than the stored value. A value with no
+                    // option left means it was removed in a later version;
+                    // the cell falls back to the raw value, because the
+                    // submission still holds it.
+                    let options = match &f.config {
+                        fields::Config::Choice { options }
+                        | fields::Config::Multi { options, .. } => Value::Array(
+                            options
+                                .iter()
+                                .map(|o| json!({ "value": o.value, "label": o.label }))
+                                .collect(),
+                        ),
+                        _ => Value::Null,
+                    };
+                    json!({
+                        "key": f.key,
+                        "label": f.label,
+                        "type": f.ty.as_str(),
+                        "options": options
+                    })
+                })
+                .collect(),
+            Err(e) => return api::envelope_err(api::code::INVALID_PROTOCOL, e.to_string()),
+        };
+
+        // Who the creator has hidden, across every page.
+        let hidden: Vec<String> = self
+            .index_pages
+            .iter()
+            .filter_map(|p| p.get("hidden_keys").and_then(Value::as_array))
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+
+        // The index entry for a submission.
+        //
+        // Joined on submitter plus submitted_at, because a submission
+        // document does not carry its own CID — it is content-addressed, so
+        // the CID only exists once Storage has it, and the index is where the
+        // creator recorded it. That also makes the index the only place
+        // received_at lives; the submission only knows when it was filled in.
+        let entry_for = |submitter: &str, submitted_at: &str| -> Option<&Value> {
+            self.index_pages
+                .iter()
+                .filter_map(|p| p.get("entries").and_then(Value::as_array))
+                .flatten()
+                .find(|e| {
+                    e.get("submitter").and_then(Value::as_str) == Some(submitter)
+                        && e.get("submitted_at").and_then(Value::as_str) == Some(submitted_at)
+                })
+        };
+
+        let mut rows: Vec<Value> = Vec::new();
+        let mut submitters: Vec<String> = Vec::new();
+        for submission in &self.submissions {
+            if submission.get("experiment").and_then(Value::as_str) != Some(experiment_id) {
+                continue;
+            }
+            if submission.pointer("/protocol/id").and_then(Value::as_str) != Some(protocol_id) {
+                continue;
+            }
+            let submitter = submission
+                .pointer("/submitter/key")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if hidden.contains(&submitter) {
+                continue;
+            }
+            if !submitters.contains(&submitter) {
+                submitters.push(submitter.clone());
+            }
+
+            let submitted_at = submission
+                .get("submitted_at")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let entry = entry_for(&submitter, submitted_at);
+            let cid = entry
+                .and_then(|e| e.get("cid").and_then(Value::as_str))
+                .unwrap_or("")
+                .to_string();
+            let received = entry
+                .and_then(|e| e.get("received_at").and_then(Value::as_str))
+                .unwrap_or("")
+                .to_string();
+            rows.push(json!({
+                "id": submission.get("id").and_then(Value::as_str).unwrap_or(""),
+                "cid": cid,
+                "submitter": submitter,
+                "submitter_name": submission.pointer("/submitter/name").and_then(Value::as_str).unwrap_or(""),
+                "version": submission.pointer("/protocol/version").and_then(Value::as_u64).unwrap_or(0),
+                "submitted_at": submitted_at,
+                // Empty when the index has no entry yet: received but not
+                // indexed is a real state, and blanking it says so.
+                "received_at": received,
+                "values": submission.get("values").cloned().unwrap_or_else(|| json!({})),
+            }));
+        }
+
+        // What the index says was received, which may exceed what this node
+        // has fetched — the difference is worth showing rather than hiding.
+        let indexed = self
+            .index_pages
+            .iter()
+            .filter_map(|p| p.get("entries").and_then(Value::as_array))
+            .flatten()
+            .filter(|e| e.get("protocol").and_then(Value::as_str) == Some(protocol_id))
+            .filter(|e| {
+                e.get("submitter")
+                    .and_then(Value::as_str)
+                    .map(|k| !hidden.contains(&k.to_string()))
+                    .unwrap_or(false)
+            })
+            .count();
+
+        api::envelope_ok(json!({
+            "protocol": { "id": protocol_id, "name": protocol.get("name").and_then(Value::as_str).unwrap_or("") },
+            "columns": columns,
+            "rows": rows,
+            "summary": {
+                "shown": rows.len(),
+                "indexed": indexed,
+                "submitters": submitters.len(),
+                "hidden": hidden.len(),
+                // Held locally vs named in the index: a creator who has not
+                // fetched everything should know.
+                "not_fetched": indexed.saturating_sub(rows.len()),
+            }
+        }))
     }
 
     pub fn creator_key(&self) -> &str {
@@ -540,6 +719,8 @@ mod tests {
         let mut session = Session {
             experiments: Vec::new(),
             protocols: Vec::new(),
+            submissions: Vec::new(),
+            index_pages: Vec::new(),
             creator_key: "3a".repeat(32),
             identity: None,
         };
@@ -837,6 +1018,8 @@ mod tests {
         let mut s = Session {
             experiments: Vec::new(),
             protocols: Vec::new(),
+            submissions: Vec::new(),
+            index_pages: Vec::new(),
             creator_key: "3a".repeat(32),
             identity: None,
         };
@@ -846,6 +1029,99 @@ mod tests {
         ));
         assert_eq!(out["ok"], json!(false));
         assert!(!s.can_sign());
+    }
+
+    /// A session holding the example experiment, protocol, submission and
+    /// index page — what fixtures mode seeds.
+    fn seeded() -> Session {
+        Session {
+            experiments: vec![serde_json::from_str(api::fixture_experiment()).unwrap()],
+            protocols: vec![serde_json::from_str(api::fixture_protocol()).unwrap()],
+            submissions: vec![serde_json::from_str(api::fixture_submission()).unwrap()],
+            index_pages: vec![serde_json::from_str(api::fixture_index()).unwrap()],
+            creator_key: "3a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f21".into(),
+            identity: None,
+        }
+    }
+
+    fn results_request() -> String {
+        json!({ "experimentId": "q7k2m3x4w3b5n6tz", "protocolId": "wildlife-sighting" }).to_string()
+    }
+
+    #[test]
+    fn results_columns_follow_the_protocol_fields() {
+        // SPEC 3.3: the table's columns are the form's fields, in order.
+        let out = data(&seeded().results(&results_request()));
+        let keys: Vec<&str> = out["columns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["key"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            keys,
+            ["photos", "category", "species", "count", "location", "observed", "behaviour", "notes"]
+        );
+        // The type travels too, so a cell can be rendered for what it is.
+        assert_eq!(out["columns"][0]["type"], json!("photo"));
+        assert_eq!(out["columns"][4]["type"], json!("location"));
+        // A choice column carries its options so the cell can show a label.
+        assert_eq!(out["columns"][1]["options"][0]["value"], json!("birds"));
+        assert_eq!(out["columns"][1]["options"][0]["label"], json!("Birds"));
+        // A column with no options says so rather than inventing an empty
+        // list, so a cell can tell the difference.
+        assert_eq!(out["columns"][2]["options"], json!(null));
+    }
+
+    #[test]
+    fn results_rows_carry_the_values_and_both_timestamps() {
+        let out = data(&seeded().results(&results_request()));
+        let rows = out["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["values"]["category"], json!("birds"));
+        assert_eq!(rows[0]["version"], json!(2));
+        // submitted_at comes from the submission; received_at only exists in
+        // the index, which is the creator's own record.
+        assert_eq!(rows[0]["submitted_at"], json!("2026-10-28T07:50:12+05:30"));
+        assert_eq!(rows[0]["received_at"], json!("2026-10-28T07:50:31+05:30"));
+    }
+
+    #[test]
+    fn results_summary_separates_held_from_indexed() {
+        // The index names two entries but only one belongs to this protocol,
+        // and this node holds that one.
+        let out = data(&seeded().results(&results_request()));
+        assert_eq!(out["summary"]["shown"], json!(1));
+        assert_eq!(out["summary"]["indexed"], json!(1));
+        assert_eq!(out["summary"]["not_fetched"], json!(0));
+        assert_eq!(out["summary"]["submitters"], json!(1));
+    }
+
+    #[test]
+    fn results_drop_a_hidden_submitter() {
+        // SPEC 3.3: hiding removes the submitter from results and export.
+        let mut s = seeded();
+        let submitter = s.submissions[0]["submitter"]["key"].as_str().unwrap().to_string();
+        s.index_pages[0]["hidden_keys"] = json!([submitter]);
+        let out = data(&s.results(&results_request()));
+        assert_eq!(out["rows"], json!([]));
+        assert_eq!(out["summary"]["shown"], json!(0));
+    }
+
+    #[test]
+    fn results_reject_an_unknown_protocol() {
+        let out = envelope(&seeded().results(
+            &json!({ "experimentId": "q7k2m3x4w3b5n6tz", "protocolId": "nope" }).to_string(),
+        ));
+        assert_eq!(out["ok"], json!(false));
+    }
+
+    #[test]
+    fn results_require_both_ids() {
+        for request in [json!({}), json!({ "experimentId": "q7k2m3x4w3b5n6tz" })] {
+            let out = envelope(&seeded().results(&request.to_string()));
+            assert_eq!(out["ok"], json!(false), "{out}");
+        }
     }
 
     #[test]
@@ -867,6 +1143,8 @@ mod tests {
         let s = Session {
             experiments: vec![serde_json::from_str(api::fixture_experiment()).unwrap()],
             protocols: vec![serde_json::from_str(api::fixture_protocol()).unwrap()],
+            submissions: Vec::new(),
+            index_pages: Vec::new(),
             creator_key: "3a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f21".into(),
             identity: None,
         };

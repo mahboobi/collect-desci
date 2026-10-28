@@ -27,6 +27,8 @@ Item {
     property var builderProblems: ({})
     /// The protocol being edited, or null when adding a new one.
     property var editingProtocol: null
+    /// The results.list payload for the open form.
+    property var resultsData: null
 
     // The typed replica for this module's own backend. Null until the view
     // module is ready, so every read is guarded.
@@ -193,6 +195,7 @@ Item {
             case "submitted": return submittedPage;
             case "new":       return newPage;
             case "builder":   return builderPage;
+            case "results":   return resultsPage;
             default:          return homePage;
             }
         }
@@ -223,6 +226,14 @@ Item {
                 app.editingProtocol = null;
                 app.builderProblems = ({});
                 app.page = "builder";
+            }
+            onOpenResults: function (protocolId) {
+                app.call("results.list",
+                         { experimentId: app.openExperimentId, protocolId: protocolId },
+                         function (data) {
+                             app.resultsData = data;
+                             app.page = "results";
+                         });
             }
             onEditProtocol: function (protocolId) {
                 app.editingProtocol = Core.protocolById(protocolId);
@@ -291,6 +302,15 @@ Item {
                     newScreen.saving = false;
                 });
             }
+        }
+    }
+
+    Component {
+        id: resultsPage
+
+        Results {
+            results: app.resultsData
+            onBack: app.page = "detail"
         }
     }
 

@@ -21,6 +21,7 @@ Flickable {
 
     signal openProtocol(string protocolId)
     signal editProtocol(string protocolId)
+    signal openResults(string protocolId)
     signal addProtocol()
     signal back()
 
@@ -255,7 +256,8 @@ Flickable {
 
                         Column {
                             anchors.verticalCenter: parent.verticalCenter
-                            width: parent.width - fillButton.width - Theme.s24
+                            width: parent.width - fillButton.width
+                                   - (screen.mine ? resultsButton.width + Theme.s12 : 0) - Theme.s24
                             spacing: Theme.s4
 
                             Text {
@@ -274,6 +276,32 @@ Flickable {
                                 font.family: Theme.sans
                                 font.pixelSize: Theme.meta
                                 color: Theme.ink3
+                            }
+                        }
+
+                        Button {
+                            id: resultsButton
+                            visible: screen.mine
+                            anchors.verticalCenter: parent.verticalCenter
+                            height: Theme.touchTarget
+                            leftPadding: Theme.s16
+                            rightPadding: Theme.s16
+                            text: "Results"
+                            Accessible.name: "See results for " + (card.doc ? card.doc.name : card.modelData.id)
+                            onClicked: screen.openResults(card.modelData.id)
+                            contentItem: Text {
+                                text: resultsButton.text
+                                font.family: Theme.sans
+                                font.pixelSize: Theme.small
+                                font.weight: Theme.medium
+                                color: Theme.accent
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            background: Rectangle {
+                                radius: Theme.rControl
+                                color: resultsButton.down ? Theme.accentTint : "transparent"
+                                border.width: 1
+                                border.color: Theme.accent
                             }
                         }
 
