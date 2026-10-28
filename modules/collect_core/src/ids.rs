@@ -34,7 +34,9 @@ pub fn new_nonce() -> [u8; NONCE_LEN] {
 
 /// Does `s` look like an experiment id? Mirrors the schema's pattern.
 pub fn is_experiment_id(s: &str) -> bool {
-    s.len() == 16 && s.bytes().all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b))
+    s.len() == 16
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b))
 }
 
 /// Does `s` look like a protocol id? Mirrors the schema's pattern:
@@ -43,7 +45,10 @@ pub fn is_protocol_id(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
         && s.split('-').all(|part| {
-            !part.is_empty() && part.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
         })
 }
 
@@ -77,9 +82,7 @@ pub fn parse_link(link: &str) -> Option<(String, String)> {
     }
     // `m` is the only parameter v1 defines, but tolerate it appearing
     // alongside others rather than only as the first.
-    let manifest = query
-        .split('&')
-        .find_map(|pair| pair.strip_prefix("m="))?;
+    let manifest = query.split('&').find_map(|pair| pair.strip_prefix("m="))?;
     if manifest.is_empty() {
         return None;
     }
@@ -166,7 +169,10 @@ mod tests {
     #[test]
     fn link_round_trips() {
         let l = link("q7k2m3x4w3b5n6tz", "logos:zb2rhManifestV4");
-        assert_eq!(l, "logos-collect://exp/q7k2m3x4w3b5n6tz?m=logos:zb2rhManifestV4");
+        assert_eq!(
+            l,
+            "logos-collect://exp/q7k2m3x4w3b5n6tz?m=logos:zb2rhManifestV4"
+        );
         assert_eq!(
             parse_link(&l),
             Some((
@@ -179,8 +185,7 @@ mod tests {
     #[test]
     fn parse_link_finds_m_among_other_parameters() {
         assert_eq!(
-            parse_link("logos-collect://exp/q7k2m3x4w3b5n6tz?x=1&m=logos:abc")
-                .map(|(_, cid)| cid),
+            parse_link("logos-collect://exp/q7k2m3x4w3b5n6tz?x=1&m=logos:abc").map(|(_, cid)| cid),
             Some("logos:abc".to_string())
         );
     }

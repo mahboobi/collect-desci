@@ -12,7 +12,7 @@
 //! see *why* — so we read the declared kind first and validate against that
 //! branch alone, which reports the offending member by path.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::OnceLock;
 
 /// The data contract, embedded at build time from `schemas/collect.schema.json`.
@@ -117,7 +117,9 @@ fn branch_schema(kind: Kind) -> Value {
                 .as_array()
                 .expect("announcement has a oneOf")
                 .iter()
-                .find(|b| b.pointer("/properties/kind/const").and_then(Value::as_str) == Some(which))
+                .find(|b| {
+                    b.pointer("/properties/kind/const").and_then(Value::as_str) == Some(which)
+                })
                 .cloned()
                 .expect("announcement branch exists for every kind");
             json!({ "allOf": [base, branch] })
@@ -132,7 +134,12 @@ fn branch_schema(kind: Kind) -> Value {
 
 fn branch(kind: Kind) -> &'static jsonschema::Validator {
     static V: OnceLock<Vec<jsonschema::Validator>> = OnceLock::new();
-    &V.get_or_init(|| Kind::ALL.iter().map(|k| compile(&branch_schema(*k))).collect())[kind.slot()]
+    &V.get_or_init(|| {
+        Kind::ALL
+            .iter()
+            .map(|k| compile(&branch_schema(*k)))
+            .collect()
+    })[kind.slot()]
 }
 
 /// Is `doc` a valid Collect document or announcement?
@@ -491,7 +498,10 @@ mod tests {
     fn rejects_malformed_timestamps() {
         let mut s = parse(SUBMISSION);
         s["submitted_at"] = json!("28-10-2026");
-        assert!(!is_valid(&s), "format assertion for date-time is not active");
+        assert!(
+            !is_valid(&s),
+            "format assertion for date-time is not active"
+        );
     }
 
     #[test]
@@ -522,7 +532,15 @@ mod tests {
     #[test]
     fn lists_allowed_members_per_shape() {
         let m = members(Kind::Submission);
-        for expected in ["schema", "id", "experiment", "protocol", "submitter", "values", "sig"] {
+        for expected in [
+            "schema",
+            "id",
+            "experiment",
+            "protocol",
+            "submitter",
+            "values",
+            "sig",
+        ] {
             assert!(m.contains(&expected), "{expected} missing from {m:?}");
         }
         assert!(!m.contains(&"manifest"));

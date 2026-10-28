@@ -197,14 +197,26 @@ mod tests {
         assert_eq!(canon(json!("nl\nhere")), r#""nl\nhere""#);
         assert_eq!(canon(json!("bell\u{07}")), format!("\"bell{}\"", esc(7)));
         // Non-ASCII is emitted literally, never as an escape.
-        assert_eq!(canon(json!("h\u{e9}llo \u{2603}")), "\"h\u{e9}llo \u{2603}\"");
+        assert_eq!(
+            canon(json!("h\u{e9}llo \u{2603}")),
+            "\"h\u{e9}llo \u{2603}\""
+        );
     }
 
     #[test]
     fn control_character_escape_table() {
-        assert_eq!(canon(json!(String::from(ch(0x0)))), format!("\"{}\"", esc(0x0)));
-        assert_eq!(canon(json!(String::from(ch(0x1)))), format!("\"{}\"", esc(0x1)));
-        assert_eq!(canon(json!(String::from(ch(0x1f)))), format!("\"{}\"", esc(0x1f)));
+        assert_eq!(
+            canon(json!(String::from(ch(0x0)))),
+            format!("\"{}\"", esc(0x0))
+        );
+        assert_eq!(
+            canon(json!(String::from(ch(0x1)))),
+            format!("\"{}\"", esc(0x1))
+        );
+        assert_eq!(
+            canon(json!(String::from(ch(0x1f)))),
+            format!("\"{}\"", esc(0x1f))
+        );
         assert_eq!(canon(json!("\u{20}")), r#"" ""#);
         // U+007F is not a JSON escape case, so it passes through.
         assert_eq!(canon(json!("\u{7f}")), "\"\u{7f}\"");
@@ -218,7 +230,15 @@ mod tests {
         let v = json!({"\u{10000}": 1, "\u{e000}": 2});
         assert_eq!(
             canon(v),
-            format!("{{{}{}{}:1,{}{}{}:2}}", '"', ch(0x10000), '"', '"', ch(0xe000), '"')
+            format!(
+                "{{{}{}{}:1,{}{}{}:2}}",
+                '"',
+                ch(0x10000),
+                '"',
+                '"',
+                ch(0xe000),
+                '"'
+            )
         );
     }
 

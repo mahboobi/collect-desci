@@ -112,7 +112,11 @@ pub fn author_key(doc: &Value) -> Result<(&'static str, [u8; PUBLIC_KEY_LEN]), E
 /// The schema pins `key` and `sig` to lower-case hex of a fixed width, so an
 /// upper-case or short string is a malformed document, not a lenient case.
 fn hex_exact<const N: usize>(s: &str) -> Option<[u8; N]> {
-    if s.len() != N * 2 || !s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+    if s.len() != N * 2
+        || !s
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
         return None;
     }
     let mut out = [0u8; N];
@@ -158,7 +162,10 @@ mod tests {
         let signed = sign(&doc_for(&key), &key).unwrap();
         let sig = signed["sig"].as_str().unwrap();
         assert_eq!(sig.len(), 128);
-        assert!(sig.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        assert!(
+            sig.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        );
     }
 
     #[test]
@@ -195,10 +202,7 @@ mod tests {
         let key = key_from_seed(1);
         let mut signed = sign(&doc_for(&key), &key).unwrap();
         signed["values"]["count"] = json!(4);
-        assert!(matches!(
-            verify(&signed),
-            Err(Error::BadSignature { .. })
-        ));
+        assert!(matches!(verify(&signed), Err(Error::BadSignature { .. })));
     }
 
     #[test]
@@ -246,10 +250,7 @@ mod tests {
     fn rejects_missing_or_malformed_sig() {
         let key = key_from_seed(1);
         let unsigned = doc_for(&key);
-        assert!(matches!(
-            verify(&unsigned),
-            Err(Error::MissingSignature)
-        ));
+        assert!(matches!(verify(&unsigned), Err(Error::MissingSignature)));
 
         let mut short = sign(&unsigned, &key).unwrap();
         short["sig"] = json!("abcd");
@@ -268,11 +269,15 @@ mod tests {
     fn finds_the_author_key_for_each_self_contained_shape() {
         let k = hex::encode([0xabu8; 32]);
         assert_eq!(
-            author_key(&json!({"creator": {"key": k.clone()}})).unwrap().0,
+            author_key(&json!({"creator": {"key": k.clone()}}))
+                .unwrap()
+                .0,
             "creator.key"
         );
         assert_eq!(
-            author_key(&json!({"submitter": {"key": k.clone()}})).unwrap().0,
+            author_key(&json!({"submitter": {"key": k.clone()}}))
+                .unwrap()
+                .0,
             "submitter.key"
         );
         assert_eq!(author_key(&json!({"from": k})).unwrap().0, "from");
