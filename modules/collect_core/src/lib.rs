@@ -8,5 +8,6 @@ pub mod canonical;
 pub mod fields;
 pub mod geo;
 pub mod ids;
+pub mod indexer;
 pub mod schema;
 pub mod sign;
