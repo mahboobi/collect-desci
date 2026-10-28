@@ -5,3 +5,4 @@
 //! UI reaches it through `logos.callModule`. See `CLAUDE.md`.
 
 pub mod canonical;
+pub mod sign;
