@@ -1,0 +1,33 @@
+{
+  "name": "collect_ui",
+  "display_name": "Collect",
+  "version": "0.1.0",
+  "type": "ui_qml",
+  "interface": "universal",
+  "category": "science",
+  "description": "Define an experiment with custom data collection forms, or fill one in.",
+  "main": "collect_ui_plugin",
+  "icon": "src/icons/icon.png",
+  "view": "qml/Main.qml",
+  "dependencies": [
+    "collect_core"
+  ],
+  "provides": [],
+  "uses": [],
+  "codegen": {
+    "rep": "src/collect_ui.rep"
+  },
+  "nix": {
+    "packages": {
+      "build": [],
+      "runtime": []
+    },
+    "external_libraries": [],
+    "cmake": {
+      "find_packages": [],
+      "extra_sources": [],
+      "extra_include_dirs": [],
+      "extra_link_libraries": []
+    }
+  }
+}

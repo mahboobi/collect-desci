@@ -1,0 +1,39 @@
+// The typed interface QML binds as logos.module("collect_ui").
+//
+// PROPs auto-sync, which is what the long-lived surfaces want: S3's progress
+// ladder and C4's cards change underneath the view rather than being polled.
+// SLOTs return through logos.watch(call, onOk, onErr).
+//
+// Everything crosses as a JSON string, because that is what collect_core's
+// Rust ABI accepts (only String/i64/u64/f64/bool/Vec<u8>/Option<T>) and
+// re-encoding into a second shape here would be two contracts to keep in step.
+//
+// NOT YET IMPLEMENTED — see SPEC Q12. If collect_ui becomes a `ui-qml` module
+// instead, this file and the backend go away and QML calls
+// logos.callModule("collect_core", method, [json]) directly. The screens and
+// the form renderer are unaffected either way: they read from Core.qml.
+class CollectUi
+{
+    // Node, storage and delivery state, as JSON. Auto-synced so the header
+    // can show it without asking.
+    PROP(QString sessionStatus="{}" READONLY)
+
+    // The signed-in identity: key, fingerprint, name.
+    PROP(QString identity="{}" READONLY)
+
+    // ---- creator ----
+    SLOT(QString experimentsListMine())
+    SLOT(QString experimentsCreate(QString json))
+    SLOT(QString experimentsPublish(QString experimentId))
+
+    // ---- submitter ----
+    SLOT(QString experimentsOpen(QString link))
+    SLOT(QString submissionsNewDraft(QString json))
+    SLOT(QString submissionsValidate(QString draftId))
+    SLOT(QString submissionsSubmit(QString draftId))
+    SLOT(QString submissionsMine(QString experimentId))
+
+    // ---- media ----
+    // Returns a job id; progress and the cleaned media entry arrive as events.
+    SLOT(QString submissionsAddMedia(QString draftId, QString fieldKey, QString path))
+}

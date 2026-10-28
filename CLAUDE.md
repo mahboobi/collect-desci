@@ -47,8 +47,10 @@ collect/
 - Location rounding (`rounded_1km`) happens before anything is stored.
 - The form is rendered from the protocol JSON. Never hard-code a protocol's fields in QML.
 - Follow the design files in `design/canvas/` for copy and layout, and `design/Theme.qml` for tokens. 44 px targets; every control keyboard-reachable with an accessible name.
-- Build the UI against fixtures (`COLLECT_FIXTURES=1`, data from `examples/`) first, then wire to live data.
-- Tests: schema validation of examples, signing and verification, metadata stripping, rounding, index paging, window checks, rate limit. Run `python3 tools/validate.py` in CI.
+- Build the UI against fixtures (`COLLECT_FIXTURES=1`, data from `examples/`) first, then wire to live data. `COLLECT_FIXTURES` belongs to `collect_core`: the QML sandbox cannot read `examples/`, so fixture and live data reach the UI the same way, through `Core.qml`.
+- Set `QT_QUICK_CONTROLS_STYLE=Basic`. The design system customizes `background` and `contentItem` on every control, which the macOS native style refuses — controls silently lose their styling otherwise.
+- A QML property may not be named `on<Something>`: it parses as a handler for a signal `<something>`. `design/Theme.qml` shipped with `onAccent`, which made the file unloadable; it is `textOnAccent` now, while `design/tokens.json` keeps the `onAccent` key.
+- Tests: schema validation of examples, signing and verification, metadata stripping, rounding, index paging, window checks, rate limit. Run `python3 tools/validate.py`, `cargo test` in `modules/collect_core`, and `modules/collect_ui/tests/run.sh` in CI.
 
 ## Do not
 

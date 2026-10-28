@@ -1,0 +1,7 @@
+# Collect UI module.
+#
+# Theme.qml is copied from design/Theme.qml, which is the source of truth for
+# tokens — edit it there and re-copy, never diverge here.
+module collect
+singleton Theme 1.0 Theme.qml
+singleton Core 1.0 Core.qml

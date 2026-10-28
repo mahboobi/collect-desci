@@ -16,7 +16,10 @@ QtObject {
     readonly property color ink: "#15181C"
     readonly property color ink2: "#4C535C"
     readonly property color ink3: "#646B73"
-    readonly property color onAccent: "#FFFFFF"
+    // NOTE: the token is `onAccent` in design/tokens.json, but a QML property
+    // named `onAccent` is parsed as a handler for a signal called `accent`, so
+    // the file will not load. Renamed here; tokens.json keeps its key.
+    readonly property color textOnAccent: "#FFFFFF"
 
     // ---- Semantic
     readonly property color accent: "#0B6E4F"        // done, verified, anchored, primary action
