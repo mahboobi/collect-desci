@@ -5,10 +5,12 @@ Verified 28 October 2026 against the published API references, the
 installed `logos-scaffold` 0.4.0 (which prints its own embedded copy of the
 compatibility contract, so it is the most authoritative source here).
 
-**Not verified by running anything.** Nix is not installed on this machine, so
-no module was built and no profile was launched. Everything below is read from
-documentation and the scaffold binary. The items marked **needs a node** cannot
-be settled any other way.
+**Updated the same day** after finding Nix *was* already installed (2.35.4,
+flakes on, 24 GB store). The templates and the Rust SDK source were fetched and
+read, which settled the open half of Q1 and most of Q8 — see "Round 2" below.
+
+**Still not verified by running anything.** No module was built and no profile
+was launched, so items marked **needs a node** remain open.
 
 ---
 
@@ -20,12 +22,14 @@ be settled any other way.
 | "nothing can be deleted" | `remove()` deletes from **local** storage. The network copy and DHT record cannot be withdrawn. | §2, §3.3 |
 | "pins every document" | There is no pin operation. Persistence is "stored locally and not removed"; `setAdvertise()` only controls DHT announcement. | §2 |
 | C4 shows "storage size and **copies**" | No API returns a replication count. | §3.3 |
-| "gives up after 10 min" | No timeout parameter on download; must be a client-side timer. | §3.3 |
+| "gives up after 10 min" | Storage takes no timeout, but every generated call has one (`_with_timeout`, default **20 s**) — round 2. | §3.3 |
 | `logos.callModule(..., [jsonString])` returning `{ok, data}` | `callModule` exists, but the `{ok, data}` envelope is an app convention, not the platform's. Typed methods are the platform contract. | §6 |
 | Announcements just publish to a topic | **logos.test requires a funded RLN membership before the node starts.** | §2 |
 | Re-announce "up to 7 days" | Delivery Store retention is operator-configured, not guaranteed. | §2 |
 | (not stated) | Effective message size cap is ~150 KiB. | §2 |
-| (not stated) | `module_data/` does not survive a relaunch. | new §10 |
+| (not stated) | `lgs basecamp launch` scrubs per-module state; the platform itself gives `instance_persistence_path` — round 2. | Q8 |
+| §6's `callModule` shape for the UI's own backend | `ui-qml-backend` uses a typed `.rep` replica and `logos.watch`, not `callModule` — round 2. | §6 |
+| (not stated) | Rust boundary types are `String`/`i64`/`u64`/`f64`/`bool`/`Vec<u8>`/`Option<T>` only, so JSON-in-a-String is forced, not chosen — round 2. | §6 |
 
 ---
 
@@ -75,13 +79,7 @@ That is fine and is what §6 already describes; it is just not inherited from
 the platform. Long jobs returning `{job}` plus progress events also work, since
 events are declared alongside methods in the module class.
 
-**Still open:** the `rust` and `rust-with-external-lib` templates are confirmed
-to exist ("Minimal core module written in Rust", "Rust module linking an
-external C library"), but **how a Rust module declares its methods, emits
-events, and calls other modules is not documented anywhere public.** Reading
-the template source needs the flake, so this is blocked on Nix. Until then,
-`collect_core` is a plain Rust library with no Logos-facing layer — which is
-exactly how it is written today, so nothing is wasted either way.
+**Settled in round 2** by reading the template itself — see below.
 
 ---
 
@@ -139,11 +137,13 @@ summary card cannot show "copies" as §3.3 describes. The honest substitutes are
 the count the spec's own fallback suggests (copies *we know of*: creator,
 submitter, mirror) or dropping the number.
 
-**No fetch timeout.** Neither download method takes one; both are async with
-completion events. The §3.3 "gives up after 10 min" has to be a timer on our
-side that stops waiting for `storageDownloadDone`. Note `local` means "only
-reads from locally cached data (no network)", which is the right flag for
-re-reading our own documents without a network round trip.
+**No fetch timeout in the Storage API itself** — both download methods are
+async with completion events. But round 2 found the call layer has one:
+`_with_timeout` on every generated method, protocol default 20 s. So §3.3's 10
+minutes is expressible, and the default would otherwise cut it off far too
+early. `local` means "only reads from locally cached data (no network)", which
+is the right flag for re-reading our own documents without a network round
+trip.
 
 **Size:** no per-file limit documented; config carries
 `"storage-quota": 21474836480` (20 GiB total).
@@ -296,3 +296,167 @@ it". Basecamp 0.3.0 speaks `logos-protocol` 0.9 and a module built against
 - [Delivery PR #149 — turn RLN on in the logos.test preset](https://github.com/logos-co/logos-delivery-module/pull/149)
 - [Delivery issue #4485 — 150 KiB store-sync ceiling](https://github.com/logos-messaging/logos-delivery/issues/4485)
 - `lgs basecamp docs` from logos-scaffold 0.4.0, installed locally
+
+
+---
+
+# Round 2 — read from the templates and the Rust SDK
+
+Nix turned out to be installed already. `nix flake init -t
+github:logos-co/logos-module-builder/0.3.0#rust` and `#ui-qml-backend`, plus
+`nix build …#rust-sdk-src`, answer what the docs did not.
+
+All six templates exist as `CLAUDE.md` says: `default`, `rust`,
+`rust-with-external-lib`, `ui-qml`, `ui-qml-backend`, `with-external-lib`.
+
+## Q1, the Rust half — a trait *is* the contract
+
+There is no `.lidl` to write and no `build.rs`. From the template's own header:
+
+> "Rust-FIRST authoring: the trait below IS the contract. The builder derives
+> the `.lidl` from it (`codegen.rust.trait` in metadata.json), generates the
+> C-ABI scaffold around it, and compiles this crate to a staticlib."
+
+```rust
+pub trait MinimalRustModule: Send + 'static {
+    fn greet(&mut self, name: String) -> String;
+    fn get_status(&mut self) -> String;
+    fn on_context_ready(&mut self, _ctx: &RustModuleContext) {}
+}
+
+pub trait MinimalRustModuleEvents {
+    fn greeted(&self, greeting: String);
+}
+
+include!(concat!(env!("CARGO_MANIFEST_DIR"), "/generated/provider_gen.rs"));
+
+#[no_mangle]
+pub extern "Rust" fn logos_module_install() { install::<Minimal>(); }
+```
+
+Things that constrain `collect_core` directly:
+
+- **The trait name is derived, not chosen.** Module name in PascalCase plus
+  `Module` unless it already ends in it: `collect_core` → `CollectCoreModule`.
+- **`Send + 'static` is required** — generated dispatch stores the impl as
+  `Box<dyn Any + Send>`.
+- **Only these types cross the boundary:** `String`, `i64`, `u64`, `f64`,
+  `bool`, `Vec<u8>`, `Option<T>`. No structs, no maps. **This vindicates §6's
+  JSON-string convention — it is not a stylistic choice, it is the only way to
+  pass a protocol or a submission across the ABI.**
+- `crate-type = ["staticlib"]`, and an empty `[workspace]` table so cargo does
+  not adopt a parent workspace.
+- `logos-rust-sdk` is a path dependency at `../logos-rust-sdk-src`, staged by
+  the builder from the same revision its generator comes from.
+- Events are a second trait; each method becomes a free `emit_<name>(...)`,
+  taking string arguments **by reference**.
+
+## Calling Storage and Delivery from Rust
+
+Dependencies listed in `metadata.json` get typed clients on `modules()`, and
+the host auto-loads them:
+
+```rust
+modules().counter_module.increment(1).unwrap_or(-1)
+modules().counter_module.increment_async(1, |res| { /* … */ });
+```
+
+Events from a dependency come back as an iterable `EventSubscription` that
+outlives the proxy, so it can move into a listener thread — which is how
+`collect_core` will consume `messageReceived` and `storageDownloadDone`.
+
+**This also answers the fetch-timeout question properly, and better than round
+1 did.** Every generated call has a timeout — the protocol default is **20
+seconds** — with a `_with_timeout` twin:
+
+```rust
+pub fn fetch_with_timeout(&self, sym: &str, timeout: Duration) -> Result<Quote, LogosError>;
+```
+
+So §3.3's "gives up after 10 min" is `..._with_timeout(…,
+Duration::from_secs(600))`, not a hand-rolled timer. The bound belongs to the
+call, nothing is stored, and a duration below 1 ms or past `c_int::MAX` ms is
+**refused** rather than clamped (`LogosError::InvalidTimeout`). Worth noting
+the default is 20 s: a Storage fetch left on the default would give up long
+before the spec's 10 minutes.
+
+`current_caller()` is also available, with `caller.is_module("…")` — useful if
+`collect_core` ever needs to refuse a call from anything but `collect_ui`.
+
+## Q8 — the persistence path exists
+
+```rust
+pub struct RustModuleContext {
+    pub module_path: String,
+    pub instance_id: String,
+    pub instance_persistence_path: String,
+}
+```
+
+> "`instance_persistence_path` is a writable, per-instance directory — the
+> place to keep a module's on-disk state."
+
+Read via the generated `context()`, which returns `None` until the host stamps
+it, so `on_context_ready` is where to open state.
+
+**So Q8 is much smaller than it looked.** The platform does give a module a
+proper durable directory. The scrub described in `lgs basecamp docs` is done by
+`lgs basecamp launch`, not by Basecamp itself — it is the scaffold dev-loop's
+deliberate clean-slate contract. In normal use the creator's state persists.
+
+What remains is a **testing** problem, not a design one: SPEC §8 test 3 needs
+the creator to stop and restart with its index intact, and `launch` will wipe
+it. Use a hand-launched Basecamp with `--user-dir` outside the scaffold profile
+tree, exactly as `CLAUDE.md` says.
+
+## Q1, the QML half — §6's assumption is wrong for `ui-qml-backend`
+
+The template is a `.rep` interface, a C++ backend, and a QML view:
+
+```
+class UiExample
+{
+    SLOT(int add(int a, int b))
+    PROP(QString status="Ready" READONLY)
+}
+```
+
+```qml
+readonly property var backend: logos.module("ui_example")
+readonly property string status: backend ? backend.status : ""
+
+logos.watch(backend.add(a, b), function (v) { … }, function (e) { … });
+
+Connections {
+    target: logos
+    function onViewModuleReadyChanged(moduleName, isReady) { … }
+}
+Component.onCompleted: { logos.isViewModuleReady("ui_example") }
+```
+
+So a `ui-qml-backend` module does **not** reach its backend with
+`callModule(name, method, [json])`. It gets a typed QTRO replica: `PROP`s
+auto-sync as QML properties, `SLOT`s are called directly and their pending
+reply is delivered through `logos.watch(call, onValue, onError)`.
+
+`metadata.json` for the UI side also requires `"type": "ui_qml"`, `"interface":
+"universal"`, an `icon` (the 256×256 PNG), a `view` pointing at the QML entry,
+and `codegen.rep`.
+
+### A design question this raises
+
+`collect_ui` as `ui-qml-backend` means: QML → `.rep` replica → C++ backend →
+`callModule("collect_core", …)` → Rust. Since every piece of logic already
+lives in `collect_core`, that C++ backend would be a pass-through whose only
+job is restating each `collect_core` method as a `SLOT`.
+
+The `ui-qml` template (QML-only, no C++ backend) would let QML call
+`logos.callModule("collect_core", method, [json])` and
+`callModuleAsync(..., cb)` directly, deleting that layer. `CLAUDE.md` pins
+`ui-qml-backend`, so this is **not** a change to make unilaterally — raising it
+as Q12.
+
+What `ui-qml-backend` buys that `ui-qml` does not: process isolation, and
+auto-syncing `PROP`s, which suit the long-lived status surfaces (S3's
+signed/stored/announced/received ladder, C4's summary cards) better than
+polling a JSON method would.
