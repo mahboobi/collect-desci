@@ -225,7 +225,18 @@ impl CollectCoreModule for Collect {
     }
 
     fn call(&mut self, method: String, request: String) -> String {
-        api::dispatch(&method, &request)
+        // The stateful methods live on Session, which api::dispatch cannot
+        // reach — it only knows the pure functions. Routing them here is what
+        // makes the dotted SPEC section 6 names work through one entry point;
+        // without this they fell through to unknown_method.
+        let now = chrono::Utc::now();
+        match method.as_str() {
+            "experiments.list" => self.session().list(now),
+            "experiments.get" => self.session().get(&request),
+            "experiments.create" => self.session().create(&request, now),
+            "protocols.saveDraft" => self.session().save_protocol(&request, now),
+            _ => api::dispatch(&method, &request),
+        }
     }
 
     fn on_context_ready(&mut self, ctx: &RustModuleContext) {
