@@ -1,7 +1,12 @@
 [package]
-name = "collect_core"
+name = "collect_core_logic"
 version = "0.1.0"
 edition = "2024"
+
+# Standalone crate — the empty table keeps cargo from adopting a workspace in
+# a parent directory.
+[workspace]
+
 
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["std", "serde", "clock"] }

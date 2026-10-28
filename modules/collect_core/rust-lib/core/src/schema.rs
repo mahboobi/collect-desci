@@ -15,8 +15,14 @@
 use serde_json::{Value, json};
 use std::sync::OnceLock;
 
-/// The data contract, embedded at build time from `schemas/collect.schema.json`.
-pub const SCHEMA_SOURCE: &str = include_str!("../../../schemas/collect.schema.json");
+/// The data contract, embedded at build time.
+///
+/// Read from `contract/collect.schema.json` inside this module rather than
+/// from the repository's `schemas/` directory: the Nix build's source root is
+/// the module, so anything above it is simply not there. `schemas/` stays the
+/// source of truth — `contract_copy_matches_the_repository_schema` below fails
+/// if the two drift.
+pub const SCHEMA_SOURCE: &str = include_str!("../contract/collect.schema.json");
 
 /// Which document or announcement shape a value claims to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -285,11 +291,11 @@ pub fn members(kind: Kind) -> Vec<&'static str> {
 mod tests {
     use super::*;
 
-    const EXPERIMENT: &str = include_str!("../../../examples/experiment.json");
-    const PROTOCOL: &str = include_str!("../../../examples/protocol.json");
-    const SUBMISSION: &str = include_str!("../../../examples/submission.json");
-    const INDEX: &str = include_str!("../../../examples/index.json");
-    const ANNOUNCEMENTS: &str = include_str!("../../../examples/announcements.json");
+    const EXPERIMENT: &str = include_str!("../../../../../examples/experiment.json");
+    const PROTOCOL: &str = include_str!("../../../../../examples/protocol.json");
+    const SUBMISSION: &str = include_str!("../../../../../examples/submission.json");
+    const INDEX: &str = include_str!("../../../../../examples/index.json");
+    const ANNOUNCEMENTS: &str = include_str!("../../../../../examples/announcements.json");
 
     fn parse(s: &str) -> Value {
         serde_json::from_str(s).unwrap()
@@ -297,6 +303,22 @@ mod tests {
 
     fn announcements() -> Vec<Value> {
         parse(ANNOUNCEMENTS).as_array().unwrap().clone()
+    }
+
+    /// The repository copy, reachable only when building from the repo —
+    /// which is exactly where a drift would be introduced.
+    const REPOSITORY_SCHEMA: &str = include_str!("../../../../../schemas/collect.schema.json");
+
+    #[test]
+    fn contract_copy_matches_the_repository_schema() {
+        // schemas/collect.schema.json is the source of truth; the module
+        // carries a copy only because the Nix build cannot see above its own
+        // root. Re-copy it after any contract change.
+        assert_eq!(
+            SCHEMA_SOURCE, REPOSITORY_SCHEMA,
+            "contract/collect.schema.json has drifted from schemas/collect.schema.json; \
+             re-copy it (the repository file is authoritative)"
+        );
     }
 
     #[test]

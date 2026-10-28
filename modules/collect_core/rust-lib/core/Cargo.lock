@@ -152,7 +152,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "collect_core"
+name = "collect_core_logic"
 version = "0.1.0"
 dependencies = [
  "chrono",

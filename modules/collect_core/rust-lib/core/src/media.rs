@@ -579,8 +579,13 @@ pub fn media_entry_bytes(entry: &serde_json::Value) -> Result<Vec<u8>, canonical
     canonical::to_bytes(entry)
 }
 
+/// Test-only fixture builders, shared with `api.rs`.
+///
+/// A privacy assertion is only worth something against a file that really
+/// carries the tags, so these assemble one by hand rather than asserting about
+/// an abstraction.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests_support {
     use super::*;
     use image::{DynamicImage, RgbImage};
 
@@ -592,7 +597,7 @@ mod tests {
 
     /// Little-endian TIFF/EXIF block with orientation, DateTimeOriginal with
     /// offset, and GPS position plus accuracy.
-    fn exif_block(orientation: u16, lat_dms: Dms, lon_dms: Dms) -> Vec<u8> {
+    pub(crate) fn exif_block(orientation: u16, lat_dms: Dms, lon_dms: Dms) -> Vec<u8> {
         // Entry layout: tag(2) type(2) count(4) value-or-offset(4).
         const IFD0_ENTRIES: usize = 3;
         const EXIF_ENTRIES: usize = 2;
@@ -691,7 +696,7 @@ mod tests {
         out
     }
 
-    fn plain_jpeg(width: u32, height: u32) -> Vec<u8> {
+    pub(crate) fn plain_jpeg(width: u32, height: u32) -> Vec<u8> {
         let mut image = RgbImage::new(width, height);
         // Something non-uniform, so a rotation is observable.
         for (x, y, pixel) in image.enumerate_pixels_mut() {
@@ -705,7 +710,7 @@ mod tests {
     }
 
     /// Splice an APP1 EXIF segment into a JPEG, right after SOI.
-    fn with_exif(jpeg: &[u8], exif: &[u8]) -> Vec<u8> {
+    pub(crate) fn with_exif(jpeg: &[u8], exif: &[u8]) -> Vec<u8> {
         let mut payload = Vec::new();
         payload.extend_from_slice(b"Exif\0\0");
         payload.extend_from_slice(exif);
@@ -721,20 +726,35 @@ mod tests {
     }
 
     /// Degrees, minutes and seconds as three EXIF rationals.
-    type Dms = [(u32, u32); 3];
+    pub(crate) type Dms = [(u32, u32); 3];
 
     /// Bengaluru: 12.97712 N, 77.59581 E.
-    fn bengaluru_dms() -> (Dms, Dms) {
+    pub(crate) fn bengaluru_dms() -> (Dms, Dms) {
         (
             [(12, 1), (58, 1), (37632, 1000)],
             [(77, 1), (35, 1), (44916, 1000)],
         )
     }
 
-    fn gps_jpeg(orientation: u16) -> Vec<u8> {
+    pub(crate) fn gps_jpeg(orientation: u16) -> Vec<u8> {
         let (lat, lon) = bengaluru_dms();
         with_exif(&plain_jpeg(60, 40), &exif_block(orientation, lat, lon))
     }
+
+
+    /// The standard fixture: a small JPEG carrying GPS, DateTimeOriginal with
+    /// an offset, and an upright orientation.
+    pub(crate) fn gps_jpeg_upright() -> Vec<u8> {
+        gps_jpeg(1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{DynamicImage, RgbImage};
+
+    use super::tests_support::*;
 
     // ---- the fixture itself has to be real ----
 
@@ -1032,7 +1052,7 @@ mod tests {
         let entry = cleaned.media_entry("logos:zb2rhPhotoA");
         // Check it through a submission, which is where a media entry lives.
         let mut submission: serde_json::Value =
-            serde_json::from_str(include_str!("../../../examples/submission.json")).unwrap();
+            serde_json::from_str(include_str!("../../../../../examples/submission.json")).unwrap();
         submission["values"]["photos"] = serde_json::json!([entry]);
         assert!(
             crate::schema::is_valid(&submission),

@@ -1,0 +1,32 @@
+[package]
+name = "collect_core"
+version = "0.1.0"
+edition = "2021"
+
+# This crate is its own workspace root, and core/ is its own. Excluding it
+# keeps cargo from seeing two roots nested in one tree, and keeps `cargo test`
+# working in core/ without the staged SDK this crate needs.
+[workspace]
+exclude = ["core"]
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+# The generated emit_* functions build their argument arrays with
+# serde_json::Value, so the scaffold needs it even though nothing hand-written
+# in this crate does.
+serde_json = "1"
+
+# Everything Collect actually does. Kept out of this crate because the
+# builder's generator scans this lib.rs for the trait, and the trait names
+# types from a scaffold that only exists inside a Nix build — so this crate
+# cannot be compiled or tested outside one. core/ can, and is.
+#
+# It lives *inside* this directory because the builder stages only the crate
+# named by codegen.rust.crate; a sibling path dep is not copied.
+collect_core_logic = { path = "core" }
+
+# Staged by the builder from the same logos-rust-sdk revision its code
+# generator comes from, so there is no generator/runtime skew to manage.
+logos-rust-sdk = { path = "../logos-rust-sdk-src" }

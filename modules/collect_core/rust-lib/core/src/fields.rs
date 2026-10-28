@@ -647,8 +647,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    const PROTOCOL: &str = include_str!("../../../examples/protocol.json");
-    const SUBMISSION: &str = include_str!("../../../examples/submission.json");
+    const PROTOCOL: &str = include_str!("../../../../../examples/protocol.json");
+    const SUBMISSION: &str = include_str!("../../../../../examples/submission.json");
 
     fn protocol() -> Value {
         serde_json::from_str(PROTOCOL).unwrap()

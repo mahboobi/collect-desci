@@ -460,3 +460,117 @@ What `ui-qml-backend` buys that `ui-qml` does not: process isolation, and
 auto-syncing `PROP`s, which suit the long-lived status surfaces (S3's
 signed/stored/announced/received ladder, C4's summary cards) better than
 polling a JSON method would.
+
+
+---
+
+# Round 3 — it builds
+
+`nix build .#lgx` in `modules/collect_core` produces a real package. This is
+the first thing here verified by execution rather than by reading.
+
+```
+logos-collect_core-module-lib.lgx   7.0 MB
+  manifest.json
+  variants/darwin-arm64-dev/collect_core_plugin.dylib
+```
+
+`manifest.json` carries `manifestVersion 0.6.0`, `type: core`, and the
+`hashes` block (`root`, `variants`, `variants/<variant>`) that `lgpm` validates
+on install — the thing tutorial-era tooling lacked. Note the variant is
+**`darwin-arm64-dev`**: `.#lgx` builds the dev variant, so a release package
+needs a different attribute.
+
+## The derived contract
+
+The builder extracted this from the trait, with no `.lidl` written by hand:
+
+```
+module collect_core {
+  version "0.1.0"
+  depends []
+
+  method session_capabilities() -> tstr
+  method documents_canonicalize(request: tstr) -> tstr
+  method documents_validate(request: tstr) -> tstr
+  method documents_verify(request: tstr) -> tstr
+  method protocols_validate_draft(request: tstr) -> tstr
+  method submissions_validate(request: tstr) -> tstr
+  method submissions_prepare_values(request: tstr) -> tstr
+  method submissions_process_media(request: tstr) -> tstr
+  method index_accept(request: tstr) -> tstr
+  method index_page(request: tstr) -> tstr
+  method geo_round(request: tstr) -> tstr
+  method experiments_parse_link(request: tstr) -> tstr
+  method call(method: tstr, request: tstr) -> tstr
+
+  event submission_received(experiment: tstr, protocol: tstr, cid: tstr)
+  event receipt_received(cid: tstr)
+  event media_processed(draft_id: tstr, field_key: tstr, result: tstr)
+  event sync_status_changed(status: tstr)
+}
+```
+
+Two things confirmed by their absence: `on_context_ready` is **not** published
+(framework plumbing, as the template says), and every parameter is `tstr` —
+there was never an option to pass a struct.
+
+## What the build actually required
+
+Six things, none of them documented anywhere public. Each cost a failed build.
+
+**1. The trait must be in `src/lib.rs` of the crate named by
+`codegen.rust.crate`.** The generator extracts the contract by scanning that
+one file:
+
+> `Failed to extract contract from .../rust-lib/src/lib.rs: trait CollectCoreModule not found in source`
+
+So the trait cannot be moved to a submodule, and cannot be behind a `cfg`.
+
+**2. That crate cannot be built or tested outside Nix.** The trait's
+`on_context_ready` names `RustModuleContext`, which only the injected
+`generated/provider_gen.rs` defines. Combined with (1), the module crate is
+necessarily a shim. Collect's logic lives in a separate crate — all 222 tests
+run there with no Logos dependency — and the shim forwards to it.
+
+**3. The builder stages only that crate's directory.** A path dependency on a
+sibling (`path = "../core"`) is simply not in the build tree:
+
+> `failed to read .../logos-collect_core-rust-src/core/Cargo.toml`
+
+So the logic crate lives *inside* `rust-lib/` as `rust-lib/core/`.
+
+**4. A nested crate needs `exclude`.** Two crates each declaring `[workspace]`
+in one tree is an error (`multiple workspace roots found in the same
+workspace`). The outer declares `[workspace] exclude = ["core"]`, which keeps
+the inner crate independently testable — it must not need the staged SDK.
+
+**5. `rust-lib/Cargo.lock` must be committed**, and generated against the
+staged SDK, because the SDK is a path dependency that does not exist until it
+is staged:
+
+```bash
+nix build github:logos-co/logos-module-builder/0.3.0#rust-sdk-src -o logos-rust-sdk-src
+(cd rust-lib && cargo generate-lockfile)
+```
+
+**6. The module crate needs `serde_json`** even when nothing hand-written in it
+does. The generated `emit_*` functions build their argument arrays with
+`serde_json::Value`.
+
+## The flake root is the module, not the repository
+
+`src = ./.` means the module directory. Anything above it does not exist in the
+build, which is why `schemas/collect.schema.json` could not be `include_str!`d
+and the module carries `rust-lib/core/contract/collect.schema.json` instead.
+`schemas/` stays the source of truth; a test asserts the two are byte-identical
+and fails if they drift. That test only compiles under `cfg(test)`, where the
+repository path *is* reachable — which is exactly where a drift would be
+introduced.
+
+## Still not verified
+
+Nothing has been **loaded**. The package builds and validates structurally, but
+`lgs basecamp setup` has not run, so no module has been installed into a
+profile and no call has crossed the real ABI. Q9 (RLN membership) and the
+whole Storage/Delivery surface remain untouched.

@@ -12,3 +12,13 @@ result-*
 
 # Rust
 target/
+
+# Logos module builder
+# The SDK is staged by `nix build ...#rust-sdk-src -o logos-rust-sdk-src` and
+# the scaffold is injected at build time; neither belongs in the tree.
+modules/*/logos-rust-sdk-src
+modules/*/rust-lib/generated/
+modules/*/rust-lib/target/
+modules/*/rust-lib/core/target/
+result
+result-*

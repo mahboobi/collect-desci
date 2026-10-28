@@ -24,8 +24,20 @@ collect/
   CLAUDE.md  SPEC.md  scaffold.toml
   modules/collect_ui/      # ui-qml-backend template, QML
   modules/collect_core/    # rust template
-  schemas/  examples/  tools/  design/
+    metadata.json flake.nix CMakeLists.txt
+    rust-lib/              # the crate named by codegen.rust.crate
+      Cargo.toml Cargo.lock
+      src/lib.rs           # the trait — the builder scans THIS file for it
+      core/                # all the logic, and every test
+        contract/collect.schema.json   # copy; schemas/ is the source of truth
+  schemas/  examples/  tools/  design/  docs/
 ```
+
+The split is forced, not stylistic. The builder scans `rust-lib/src/lib.rs`
+for the trait, and the trait names types from a scaffold that only exists in a
+Nix build — so that crate cannot be tested. The logic crate sits *inside*
+`rust-lib/` because the builder stages only that directory; a sibling path dep
+is not copied. See `docs/api-verification.md` round 3.
 
 ## Platform constraints
 
@@ -34,7 +46,9 @@ collect/
 3. Delivery Store is temporary and its retention is operator-configured. Messages cap out at ~150 KiB. Submitters re-announce until they get a receipt; the creator re-publishes `head` every 10 minutes. **`logos.test` requires a funded RLN membership before a node starts** (600 s epochs) — see SPEC.md Q9, which gates submitter-side announcements.
 4. Logos Chat addresses change on every launch; do not use Chat for anything here.
 5. `lgs basecamp launch <profile>` wipes the profile, including basecamp's per-module `module_data/`. A module needing state across launches must not keep it there (SPEC.md Q8). For tests that need persistence, hand-launch Basecamp with `--user-dir` pointing outside the scaffold profile tree.
-6. Nix package builds see only git-tracked files: `git add` new files before `nix build .#lgx`.
+6. Nix package builds see only git-tracked files: `git add` new files before `nix build .#lgx`. The flake root is the module directory, so nothing above it exists in the build — that is why the contract is copied into the module.
+6b. `rust-lib/Cargo.lock` is committed and must be regenerated against the staged SDK after any dependency change:
+    `nix build github:logos-co/logos-module-builder/0.3.0#rust-sdk-src -o logos-rust-sdk-src && (cd rust-lib && cargo generate-lockfile)`
 7. Each sub-flake must expose `packages.<system>.lgx`, and every transitive `logos-module-builder` input must `follows` the top-level pin — otherwise `flake.lock` carries two and the stale one wins under scaffold's `--override-input`. Sibling inputs must use the single-line `path:../<sibling>` form; the scaffold parser is line-level.
 8. A `ui_qml` package must ship a 256x256 PNG icon at `assets/icon.png`, and `main` / `view` in `metadata.json` must name files that exist in the built variant. Validation rejects both.
 9. On macOS the module socket path is capped at 104 bytes, so keep `runtime_dir` short (`/tmp/lgs-<profile>` is the scaffold default).

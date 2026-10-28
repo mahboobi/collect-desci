@@ -502,9 +502,9 @@ mod tests {
     use super::*;
     use crate::fields::parse_fields;
 
-    const PROTOCOL: &str = include_str!("../../../examples/protocol.json");
-    const SUBMISSION: &str = include_str!("../../../examples/submission.json");
-    const INDEX: &str = include_str!("../../../examples/index.json");
+    const PROTOCOL: &str = include_str!("../../../../../examples/protocol.json");
+    const SUBMISSION: &str = include_str!("../../../../../examples/submission.json");
+    const INDEX: &str = include_str!("../../../../../examples/index.json");
 
     const EXPERIMENT_ID: &str = "q7k2m3x4w3b5n6tz";
     const ALICE: &str = "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4";
