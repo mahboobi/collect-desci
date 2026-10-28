@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Collect · Urban wildlife sightings</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#F5F6F3}
+a{color:#0B6E4F}a:hover{color:#08523B}
+</style>
+</helmet>
+<div style="min-height: 100vh; background: #F5F6F3; color: #15181C; font-family: 'IBM Plex Sans', system-ui, sans-serif; font-size: 14px; line-height: 1.45">
+
+<header style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 32px; background: #FFFFFF; border-bottom: 1px solid #DDE0DA">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 28px">
+<div style="display: flex; align-items: center; gap: 10px">
+<svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true"><rect width="28" height="28" rx="7" fill="#0B6E4F"></rect><path d="M8 9.5h12M8 14h12M8 18.5h7" stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round"></path><circle cx="20" cy="18.5" r="2" fill="#FFFFFF"></circle></svg>
+<div style="display: flex; flex-direction: column; line-height: 1.2"><span style="font-weight: 600; font-size: 15px">Collect</span><span style="font-size: 12px; color: #646B73">on Logos Basecamp</span></div>
+</div>
+<nav aria-label="Collect" style="display: flex; gap: 4px">
+<a href="Main.dc.html" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 14px; border-radius: 8px; text-decoration: none; color: #15181C">Experiments</a>
+<a href="Join.dc.html" aria-current="page" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 14px; border-radius: 8px; text-decoration: none; background: #E3F1EB; color: #0B6E4F; font-weight: 600">Open a link</a>
+</nav>
+</div>
+<span style="display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: #4C535C"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; background: #0B6E4F"></span>Logos Storage online · testnet v0.3</span>
+</header>
+
+<main style="max-width: 880px; margin: 0 auto; box-sizing: border-box; padding: 28px 32px 48px; display: flex; flex-direction: column; gap: 20px">
+
+<section aria-labelledby="t-h" style="background: #FFFFFF; border: 1px solid #DDE0DA; border-radius: 14px; padding: 28px; display: flex; flex-direction: column; gap: 14px">
+<div style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center">
+<span style="font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 999px; background: #E3F1EB; color: #0B6E4F">Open until 31 Dec 2026</span>
+<span style="font-size: 12px; color: #646B73">Started 12 Oct 2026 · 1,412 submissions so far</span>
+</div>
+<h1 id="t-h" style="margin: 0; font-size: 30px; line-height: 1.2; font-weight: 600; letter-spacing: -0.01em">Urban wildlife sightings</h1>
+<p style="margin: 0; font-size: 16px; color: #15181C">We are mapping which animals live around four lakes and parks in central Bengaluru. Every sighting helps us compare lake edges with park lawns. Submissions are public and help anyone studying urban wildlife.</p>
+<div style="display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: #4C535C">
+<span>Created by <span style="color: #15181C; font-weight: 500">Nisha Kumar</span></span>
+<span>Creator key <span style="font-family: 'IBM Plex Mono', monospace">3A9D 0F21 … B71E</span></span>
+</div>
+<div style="padding: 12px 14px; border-radius: 8px; background: #F5F6F3; border: 1px solid #DDE0DA; font-size: 13px; color: #15181C">What you submit is public and stored on Logos Storage. It is signed with your Basecamp key, so others can see which submissions came from the same person. Do not include anyone's personal details.</div>
+</section>
+
+<section aria-labelledby="f-h" style="display: flex; flex-direction: column; gap: 12px">
+<h2 id="f-h" style="margin: 0; font-size: 18px; font-weight: 600">Choose a form</h2>
+<sc-for list="{{forms}}" as="f" hint-placeholder-count="3">
+<article style="background: #FFFFFF; border: 1px solid #DDE0DA; border-radius: 12px; padding: 20px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; opacity: {{f.opacity}}">
+<div style="flex: 1 1 380px; min-width: 0; display: flex; flex-direction: column; gap: 6px">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px"><h3 style="margin: 0; font-size: 17px; font-weight: 600">{{f.name}}</h3><span style="font-size: 12px; font-weight: 500; padding: 2px 8px; border-radius: 999px; background: {{f.chipBg}}; color: {{f.chipFg}}">{{f.status}}</span></div>
+<p style="margin: 0; color: #4C535C">{{f.desc}}</p>
+<span style="font-size: 12px; color: #646B73">{{f.meta}}</span>
+</div>
+<sc-if value="{{f.open}}" hint-placeholder-val="{{ true }}"><a href="Form.dc.html" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 20px; border-radius: 8px; border: 1px solid #0B6E4F; background: #0B6E4F; color: #FFFFFF; font-weight: 600; text-decoration: none">Fill in form</a></sc-if>
+<sc-if value="{{f.closed}}" hint-placeholder-val="{{ false }}"><span style="font-size: 13px; color: #4C535C">Not accepting submissions</span></sc-if>
+</article>
+</sc-for>
+</section>
+
+<section aria-labelledby="m-h" style="background: #FFFFFF; border: 1px solid #DDE0DA; border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 10px">
+<h2 id="m-h" style="margin: 0; font-size: 16px; font-weight: 600">Your submissions (12)</h2>
+<ul style="list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column">
+<li style="display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; padding: 10px 0; border-bottom: 1px solid #ECEEE9"><div style="display: flex; flex-direction: column"><span style="font-weight: 500">Wildlife sighting · Black kite</span><span style="font-size: 12px; color: #646B73">2 days ago · <span style="font-family: 'IBM Plex Mono', monospace">logos:zb2rhK…8tQe</span></span></div><span style="align-self: center; font-size: 12px; font-weight: 500; padding: 2px 8px; border-radius: 999px; background: #E3F1EB; color: #0B6E4F">Received by creator</span></li>
+<li style="display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; padding: 10px 0; border-bottom: 1px solid #ECEEE9"><div style="display: flex; flex-direction: column"><span style="font-weight: 500">Wildlife sighting · Common myna</span><span style="font-size: 12px; color: #646B73">3 days ago · <span style="font-family: 'IBM Plex Mono', monospace">logos:zb2rhP…2wVa</span></span></div><span style="align-self: center; font-size: 12px; font-weight: 500; padding: 2px 8px; border-radius: 999px; background: #E3F1EB; color: #0B6E4F">Received by creator</span></li>
+<li style="display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; padding: 10px 0"><div style="display: flex; flex-direction: column"><span style="font-weight: 500">Nest monitoring · N-07</span><span style="font-size: 12px; color: #646B73">Saved on this computer · not sent yet</span></div><span style="align-self: center; font-size: 12px; font-weight: 500; padding: 2px 8px; border-radius: 999px; background: #FBEFD9; color: #8A4B00">Draft</span></li>
+</ul>
+</section>
+
+</main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":1160}}'>
+class Component extends DCLogic {
+renderVals() {
+var defs = [
+{ name: 'Wildlife sighting', open: true, desc: 'Record any animal you see inside the study area. Photograph it before you approach.', meta: '8 questions · about 2 minutes · you have submitted 11 times' },
+{ name: 'Nest monitoring', open: true, desc: 'Weekly checks of the marked nests. Only for people trained on the nest list.', meta: '7 questions · about 3 minutes · you have submitted once' },
+{ name: 'Camera trap upload', open: false, desc: 'Closed by the creator on 20 Oct.', meta: '5 questions' }
+];
+var forms = defs.map(function (d) {
+return Object.assign({}, d, { closed: !d.open, status: d.open ? 'Open' : 'Closed', chipBg: d.open ? '#E3F1EB' : '#E6EAF0', chipFg: d.open ? '#0B6E4F' : '#3D4A5C', opacity: '1' });
+});
+return { forms: forms };
+}
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,223 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://collect.unblockresearch.com/schemas/collect.schema.json",
+  "title": "Collect documents (Logos Storage) and announcements (Logos Delivery), v1",
+  "description": "Every stored document and every Delivery message. The 'schema' (documents) or 'kind' (announcements) field selects the shape. Signatures are Ed25519 over RFC 8785 canonical JSON without 'sig'.",
+  "oneOf": [
+    { "$ref": "#/$defs/experiment" },
+    { "$ref": "#/$defs/protocol" },
+    { "$ref": "#/$defs/submission" },
+    { "$ref": "#/$defs/index" },
+    { "$ref": "#/$defs/announcement" }
+  ],
+
+  "$defs": {
+    "key": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Ed25519 public key, hex" },
+    "sig": { "type": "string", "pattern": "^[0-9a-f]{128}$", "description": "Ed25519 signature, hex" },
+    "cid": { "type": "string", "pattern": "^logos:[A-Za-z0-9]+$" },
+    "ts": { "type": "string", "format": "date-time" },
+    "experimentId": { "type": "string", "pattern": "^[a-z2-7]{16}$", "description": "base32 of the first 10 bytes of SHA-256(creator key || nonce)" },
+    "protocolId": { "type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$", "maxLength": 64 },
+    "fieldKey": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,39}$" },
+    "person": {
+      "type": "object",
+      "required": ["key"],
+      "additionalProperties": false,
+      "properties": {
+        "key": { "$ref": "#/$defs/key" },
+        "name": { "type": "string", "maxLength": 80, "description": "Optional, self-chosen, public" }
+      }
+    },
+
+    "option": {
+      "type": "object",
+      "required": ["value", "label"],
+      "additionalProperties": false,
+      "properties": { "value": { "$ref": "#/$defs/fieldKey" }, "label": { "type": "string", "minLength": 1, "maxLength": 80 } }
+    },
+
+    "field": {
+      "type": "object",
+      "required": ["key", "type", "label", "required"],
+      "additionalProperties": false,
+      "properties": {
+        "key": { "$ref": "#/$defs/fieldKey" },
+        "type": { "enum": ["text", "longtext", "number", "choice", "multi", "datetime", "photo", "location", "yesno"] },
+        "label": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "help": { "type": "string", "maxLength": 300 },
+        "required": { "type": "boolean" },
+        "config": { "type": "object" }
+      },
+      "allOf": [
+        { "if": { "properties": { "type": { "enum": ["text", "longtext"] } } }, "then": { "properties": { "config": { "type": "object", "additionalProperties": false, "properties": { "max_length": { "type": "integer", "minimum": 1, "maximum": 5000 } } } } } },
+        { "if": { "properties": { "type": { "const": "number" } } }, "then": { "properties": { "config": { "type": "object", "additionalProperties": false, "properties": { "min": { "type": "number" }, "max": { "type": "number" }, "integer": { "type": "boolean" }, "unit": { "type": "string", "maxLength": 30 } } } } } },
+        { "if": { "properties": { "type": { "enum": ["choice", "multi"] } } }, "then": { "required": ["config"], "properties": { "config": { "type": "object", "required": ["options"], "additionalProperties": false, "properties": { "options": { "type": "array", "minItems": 2, "maxItems": 50, "items": { "$ref": "#/$defs/option" } }, "min": { "type": "integer", "minimum": 0 }, "max": { "type": "integer", "minimum": 1 } } } } } },
+        { "if": { "properties": { "type": { "const": "datetime" } } }, "then": { "properties": { "config": { "type": "object", "additionalProperties": false, "properties": { "fill_from": { "type": "array", "items": { "enum": ["photo", "now"] } }, "no_future": { "type": "boolean" } } } } } },
+        { "if": { "properties": { "type": { "const": "photo" } } }, "then": { "properties": { "config": { "type": "object", "additionalProperties": false, "properties": { "min": { "type": "integer", "minimum": 0, "maximum": 10 }, "max": { "type": "integer", "minimum": 1, "maximum": 10 }, "max_mb_each": { "type": "number", "minimum": 1, "maximum": 100 }, "fill_from_exif": { "type": "array", "items": { "enum": ["location", "datetime"] } } } } } } },
+        { "if": { "properties": { "type": { "const": "location" } } }, "then": { "required": ["config"], "properties": { "config": { "type": "object", "required": ["methods", "store"], "additionalProperties": false, "properties": { "methods": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["photo", "map", "manual"] } }, "max_accuracy_m": { "type": ["number", "null"], "minimum": 1 }, "store": { "enum": ["exact", "rounded_1km"] } } } } } },
+        { "if": { "properties": { "type": { "const": "yesno" } } }, "then": { "properties": { "config": { "type": "object", "maxProperties": 0 } } } }
+      ]
+    },
+
+    "experiment": {
+      "type": "object",
+      "required": ["schema", "id", "version", "creator", "title", "description", "starts_at", "ends_at", "timezone", "protocols", "prev", "created_at", "sig"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "collect/experiment@1" },
+        "id": { "$ref": "#/$defs/experimentId" },
+        "version": { "type": "integer", "minimum": 1 },
+        "creator": { "$ref": "#/$defs/person" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "description": { "type": "string", "maxLength": 5000 },
+        "starts_at": { "$ref": "#/$defs/ts" },
+        "ends_at": { "$ref": "#/$defs/ts" },
+        "timezone": { "type": "string", "description": "IANA zone, e.g. Asia/Kolkata" },
+        "protocols": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "version", "cid", "status"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "$ref": "#/$defs/protocolId" },
+              "version": { "type": "integer", "minimum": 1 },
+              "cid": { "$ref": "#/$defs/cid" },
+              "status": { "enum": ["open", "closed"] }
+            }
+          }
+        },
+        "index": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/cid" }], "description": "Latest index page when this manifest was written" },
+        "prev": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/cid" }] },
+        "created_at": { "$ref": "#/$defs/ts" },
+        "sig": { "$ref": "#/$defs/sig" }
+      }
+    },
+
+    "protocol": {
+      "type": "object",
+      "required": ["schema", "id", "version", "experiment", "name", "instructions", "fields", "allow_multiple", "allow_drafts", "created_at", "sig"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "collect/protocol@1" },
+        "id": { "$ref": "#/$defs/protocolId" },
+        "version": { "type": "integer", "minimum": 1 },
+        "experiment": { "$ref": "#/$defs/experimentId" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "instructions": { "type": "string", "maxLength": 4000 },
+        "fields": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "$ref": "#/$defs/field" } },
+        "allow_multiple": { "type": "boolean" },
+        "allow_drafts": { "type": "boolean" },
+        "created_at": { "$ref": "#/$defs/ts" },
+        "sig": { "$ref": "#/$defs/sig" }
+      }
+    },
+
+    "media": {
+      "type": "object",
+      "required": ["cid", "sha256", "mime", "bytes"],
+      "additionalProperties": false,
+      "properties": {
+        "cid": { "$ref": "#/$defs/cid" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "mime": { "enum": ["image/jpeg", "image/png", "image/webp", "image/heic"] },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "location": {
+      "type": "object",
+      "required": ["lat", "lon", "method"],
+      "additionalProperties": false,
+      "properties": {
+        "lat": { "type": "number", "minimum": -90, "maximum": 90 },
+        "lon": { "type": "number", "minimum": -180, "maximum": 180 },
+        "accuracy_m": { "type": ["number", "null"], "minimum": 0 },
+        "method": { "enum": ["photo", "map", "manual"] },
+        "rounded": { "type": "boolean" }
+      }
+    },
+    "value": {
+      "anyOf": [
+        { "type": "string" },
+        { "type": "number" },
+        { "type": "boolean" },
+        { "type": "array", "items": { "$ref": "#/$defs/fieldKey" } },
+        { "type": "array", "items": { "$ref": "#/$defs/media" } },
+        { "$ref": "#/$defs/location" }
+      ]
+    },
+
+    "submission": {
+      "type": "object",
+      "required": ["schema", "id", "experiment", "protocol", "submitter", "submitted_at", "values", "sig"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "collect/submission@1" },
+        "id": { "type": "string", "format": "uuid", "description": "UUID v7, chosen by the submitter" },
+        "experiment": { "$ref": "#/$defs/experimentId" },
+        "protocol": {
+          "type": "object",
+          "required": ["id", "version"],
+          "additionalProperties": false,
+          "properties": { "id": { "$ref": "#/$defs/protocolId" }, "version": { "type": "integer", "minimum": 1 } }
+        },
+        "submitter": { "$ref": "#/$defs/person" },
+        "submitted_at": { "$ref": "#/$defs/ts" },
+        "values": { "type": "object", "propertyNames": { "$ref": "#/$defs/fieldKey" }, "additionalProperties": { "$ref": "#/$defs/value" } },
+        "app": { "type": "string", "maxLength": 40 },
+        "sig": { "$ref": "#/$defs/sig" }
+      }
+    },
+
+    "index": {
+      "type": "object",
+      "required": ["schema", "experiment", "page", "entries", "hidden_keys", "prev", "created_at", "sig"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "collect/index@1" },
+        "experiment": { "$ref": "#/$defs/experimentId" },
+        "page": { "type": "integer", "minimum": 1 },
+        "entries": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "type": "object",
+            "required": ["cid", "protocol", "version", "submitter", "submitted_at", "received_at"],
+            "additionalProperties": false,
+            "properties": {
+              "cid": { "$ref": "#/$defs/cid" },
+              "protocol": { "$ref": "#/$defs/protocolId" },
+              "version": { "type": "integer", "minimum": 1 },
+              "submitter": { "$ref": "#/$defs/key" },
+              "submitted_at": { "$ref": "#/$defs/ts" },
+              "received_at": { "$ref": "#/$defs/ts" }
+            }
+          }
+        },
+        "hidden_keys": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/key" } },
+        "prev": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/cid" }] },
+        "created_at": { "$ref": "#/$defs/ts" },
+        "sig": { "$ref": "#/$defs/sig" }
+      }
+    },
+
+    "announcement": {
+      "type": "object",
+      "required": ["kind", "experiment", "from", "at", "sig"],
+      "properties": {
+        "kind": { "enum": ["head", "submission", "receipt"] },
+        "experiment": { "$ref": "#/$defs/experimentId" },
+        "from": { "$ref": "#/$defs/key" },
+        "at": { "$ref": "#/$defs/ts" },
+        "sig": { "$ref": "#/$defs/sig" }
+      },
+      "oneOf": [
+        { "properties": { "kind": { "const": "head" }, "experiment": true, "from": true, "at": true, "sig": true, "manifest": { "$ref": "#/$defs/cid" }, "manifest_version": { "type": "integer", "minimum": 1 }, "index": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/cid" }] }, "index_page": { "type": "integer", "minimum": 0 } }, "required": ["manifest", "manifest_version", "index", "index_page"], "additionalProperties": false },
+        { "properties": { "kind": { "const": "submission" }, "experiment": true, "from": true, "at": true, "sig": true, "cid": { "$ref": "#/$defs/cid" }, "protocol": { "$ref": "#/$defs/protocolId" }, "version": { "type": "integer", "minimum": 1 } }, "required": ["cid", "protocol", "version"], "additionalProperties": false },
+        { "properties": { "kind": { "const": "receipt" }, "experiment": true, "from": true, "at": true, "sig": true, "cid": { "$ref": "#/$defs/cid" }, "index_page": { "type": "integer", "minimum": 1 } }, "required": ["cid", "index_page"], "additionalProperties": false }
+      ]
+    }
+  }
+}

@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Collect · Protocol builder</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#F5F6F3}
+a{color:#0B6E4F}a:hover{color:#08523B}
+</style>
+</helmet>
+<div style="min-height: 100vh; background: #F5F6F3; color: #15181C; font-family: 'IBM Plex Sans', system-ui, sans-serif; font-size: 14px; line-height: 1.45">
+
+<header style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 32px; background: #FFFFFF; border-bottom: 1px solid #DDE0DA">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 28px">
+<div style="display: flex; align-items: center; gap: 10px">
+<svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true"><rect width="28" height="28" rx="7" fill="#0B6E4F"></rect><path d="M8 9.5h12M8 14h12M8 18.5h7" stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round"></path><circle cx="20" cy="18.5" r="2" fill="#FFFFFF"></circle></svg>
+<div style="display: flex; flex-direction: column; line-height: 1.2"><span style="font-weight: 600; font-size: 15px">Collect</span><span style="font-size: 12px; color: #646B73">on Logos Basecamp</span></div>
+</div>
+<nav aria-label="Collect" style="display: flex; gap: 4px">
+<a href="Main.dc.html" aria-current="page" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 14px; border-radius: 8px; text-decoration: none; background: #E3F1EB; color: #0B6E4F; font-weight: 600">Experiments</a>
+<a href="Join.dc.html" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 14px; border-radius: 8px; text-decoration: none; color: #15181C">Open a link</a>
+</nav>
+</div>
+<span style="display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: #4C535C"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; background: #0B6E4F"></span>Logos Storage online · testnet v0.3</span>
+</header>
+
+<main style="max-width: 1180px; margin: 0 auto; box-sizing: border-box; padding: 24px 32px 48px; display: flex; flex-direction: column; gap: 20px">
+
+<nav aria-label="Breadcrumb" style="font-size: 13px; color: #646B73; display: flex; gap: 6px; flex-wrap: wrap"><a href="Main.dc.html">Experiments</a><span aria-hidden="true">/</span><a href="Experiment.dc.html">Urban wildlife sightings</a><span aria-hidden="true">/</span><span style="color: #15181C">Wildlife sighting</span></nav>
+
+<div style="display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px">
+<div style="display: flex; flex-direction: column; gap: 8px; max-width: 680px">
+<h1 style="margin: 0; font-size: 28px; line-height: 1.2; font-weight: 600; letter-spacing: -0.01em">Wildlife sighting</h1>
+<div style="display: flex; flex-wrap: wrap; gap: 6px"><span style="font-size: 12px; font-weight: 500; padding: 2px 8px; border-radius: 999px; background: #FBEFD9; color: #8A4B00">Unsaved changes · will publish as version 3</span><span style="font-size: 12px; font-weight: 500; padding: 2px 8px; border-radius: 999px; background: #E3F1EB; color: #0B6E4F">Version 2 open · 1,284 submissions</span></div>
+<p style="margin: 0; color: #4C535C; font-size: 15px">Build the form submitters fill in. Earlier submissions keep pointing to the version they used.</p>
+</div>
+<div style="display: flex; flex-wrap: wrap; gap: 8px">
+<a href="Experiment.dc.html" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 18px; border-radius: 8px; border: 1px solid #C9CDC6; background: #FFFFFF; color: #15181C; font-weight: 500; text-decoration: none">Cancel</a>
+<a href="Form.dc.html" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 18px; border-radius: 8px; border: 1px solid #C9CDC6; background: #FFFFFF; color: #15181C; font-weight: 500; text-decoration: none">Try the form</a>
+<a href="Experiment.dc.html" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 18px; border-radius: 8px; border: 1px solid #0B6E4F; background: #0B6E4F; color: #FFFFFF; font-weight: 600; text-decoration: none">Save and publish</a>
+</div>
+</div>
+
+<div style="display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start">
+
+<div style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; gap: 16px">
+
+<section aria-labelledby="about-h" style="background: #FFFFFF; border: 1px solid #DDE0DA; border-radius: 12px; padding: 24px; display: flex; flex-direction: column; gap: 16px">
+<h2 id="about-h" style="margin: 0; font-size: 16px; font-weight: 600">About this protocol</h2>
+<div style="display: flex; flex-direction: column; gap: 6px">
+<label for="pb-name" style="font-size: 12px; font-weight: 500; color: #4C535C">Name</label>
+<input id="pb-name" type="text" value="Wildlife sighting" style="font: inherit; font-size: 15px; min-height: 44px; box-sizing: border-box; padding: 0 12px; border: 1px solid #C9CDC6; border-radius: 8px; color: #15181C">
+</div>
+<div style="display: flex; flex-direction: column; gap: 6px">
+<label for="pb-desc" style="font-size: 12px; font-weight: 500; color: #4C535C">Instructions for submitters</label>
+<textarea id="pb-desc" rows="4" value="{{instructions}}" onChange="{{setInstructions}}" style="font: inherit; padding: 10px 12px; border: 1px solid #C9CDC6; border-radius: 8px; resize: vertical; color: #15181C"></textarea>
+<span style="font-size: 12px; color: #646B73">Shown at the top of the form. Say what to record, how, and what to avoid.</span>
+</div>
+</section>
+
+<section aria-labelledby="fields-h" style="background: #FFFFFF; border: 1px solid #DDE0DA; border-radius: 12px; padding: 24px; display: flex; flex-direction: column; gap: 14px">
+<div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px">
+<h2 id="fields-h" style="margin: 0; font-size: 16px; font-weight: 600">Fields ({{fieldCount}})</h2>
+<span style="font-size: 12px; color: #646B73">Select a field to change its settings. Order here is the order in the form.</span>
+</div>
+<ol style="list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px">
+<sc-for list="{{rows}}" as="f" hint-placeholder-count="9">
+<li style="display: flex; align-items: center; gap: 8px; padding: {{f.pad}}; border: {{f.borderW}} solid {{f.border}}; background: {{f.bg}}; border-radius: 10px">
+<span style="width: 24px; text-align: center; font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: #646B73">{{f.num}}</span>
+<button type="button" aria-pressed="{{f.pressed}}" onClick="{{f.select}}" style="flex: 1; min-width: 0; min-height: 44px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 0 8px; border: 0; background: transparent; color: #15181C; font: inherit; text-align: left; cursor: pointer">
+<span style="font-weight: 600">{{f.label}}</span>
+<span style="font-size: 12px; color: #4C535C">{{f.typeName}}</span>
+<span style="font-size: 11px; font-weight: 500; padding: 1px 6px; border-radius: 999px; background: {{f.reqBg}}; color: {{f.reqFg}}">{{f.reqText}}</span>
+<sc-if value="{{f.isNew}}" hint-placeholder-val="{{ false }}"><span style="font-size: 11px; font-weight: 500; padding: 1px 6px; border-radius: 999px; background: #ECEAFB; color: #4B3FB0">New in version 3</span></sc-if>
+</button>
+<button type="button" aria-label="{{f.upLabel}}" onClick="{{f.up}}" style="width: 44px; height: 44px; border-radius: 8px; border: 1px solid #DDE0DA; background: #FFFFFF; color: #4C535C; cursor: pointer"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 9l4-4 4 4"></path></svg></button>
+<button type="button" aria-label="{{f.downLabel}}" onClick="{{f.down}}" style="width: 44px; height: 44px; border-radius: 8px; border: 1px solid #DDE0DA; background: #FFFFFF; color: #4C535C; cursor: pointer"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5l4 4 4-4"></path></svg></button>
+<button type="button" aria-label="{{f.removeLabel}}" onClick="{{f.remove}}" style="min-height: 44px; padding: 0 12px; border-radius: 8px; border: 1px solid #DDE0DA; background: #FFFFFF; color: #4C535C; font: inherit; cursor: pointer">Remove</button>
+</li>
+</sc-for>
+</ol>
+<div style="display: flex; flex-direction: column; gap: 8px; padding-top: 6px">
+<span style="font-size: 12px; font-weight: 500; color: #4C535C">Add a field</span>
+<div style="display: flex; flex-wrap: wrap; gap: 8px">
+<sc-for list="{{palette}}" as="t" hint-placeholder-count="9">
+<button type="button" onClick="{{t.add}}" style="min-height: 40px; padding: 0 12px; border-radius: 8px; border: 1px dashed #B9BEB6; background: #FFFFFF; color: #15181C; font: inherit; font-size: 13px; cursor: pointer">+ {{t.label}}</button>
+</sc-for>
+</div>
+</div>
+</section>
+
+<section aria-labelledby="rules-h" style="background: #FFFFFF; border: 1px solid #DDE0DA; border-radius: 12px; padding: 24px; display: flex; flex-direction: column; gap: 12px">
+<h2 id="rules-h" style="margin: 0; font-size: 16px; font-weight: 600">Submissions</h2>
+<label style="display: flex; gap: 10px; align-items: flex-start; cursor: pointer"><input type="checkbox" checked style="width: 18px; height: 18px; margin: 2px 0 0; accent-color: #0B6E4F"><span>Let each person submit more than once</span></label>
+<label style="display: flex; gap: 10px; align-items: flex-start; cursor: pointer"><input type="checkbox" checked style="width: 18px; height: 18px; margin: 2px 0 0; accent-color: #0B6E4F"><span>Let submitters save a draft and send it later when they are back online</span></label>
+<p style="margin: 0; font-size: 13px; color: #4C535C">The form accepts submissions while the experiment is open: 12 Oct to 31 Dec 2026. Close the protocol earlier from the experiment page.</p>
+</section>
+
+</div>
+
+<aside style="flex: 1 1 380px; min-width: 0; display: flex; flex-direction: column; gap: 16px">
+
+<section aria-labelledby="set-h" style="background: #FFFFFF; border: 2px solid #4B3FB0; border-radius: 12px; padding: 19px; display: flex; flex-direction: column; gap: 14px">
+<div style="display: flex; flex-direction: column; gap: 2px">
+<span style="font-size: 12px; font-weight: 600; color: #4B3FB0">Field settings · {{sel.typeName}}</span>
+<h2 id="set-h" style="margin: 0; font-size: 16px; font-weight: 600">{{sel.label}}</h2>
+</div>
+<sc-if value="{{hasSel}}" hint-placeholder-val="{{ true }}">
+<div style="display: flex; flex-direction: column; gap: 14px">
+<div style="display: flex; flex-direction: column; gap: 6px">
+<label for="fs-label" style="font-size: 12px; font-weight: 500; color: #4C535C">Label</label>
+<input id="fs-label" type="text" value="{{sel.label}}" onChange="{{sel.setLabel}}" style="font: inherit; min-height: 44px; box-sizing: border-box; padding: 0 12px; border: 1px solid #C9CDC6; border-radius: 8px; color: #15181C">
+</div>
+<div style="display: flex; flex-direction: column; gap: 6px">
+<label for="fs-help" style="font-size: 12px; font-weight: 500; color: #4C535C">Help text</label>
+<input id="fs-help" type="text" value="{{sel.help}}" onChange="{{sel.setHelp}}" placeholder="Shown under the field" style="font: inherit; min-height: 44px; box-sizing: border-box; padding: 0 12px; border: 1px solid #C9CDC6; border-radius: 8px; color: #15181C">
+</div>
+<label style="display: flex; gap: 10px; align-items: center; min-height: 32px; cursor: pointer"><input type="checkbox" checked="{{sel.required}}" onChange="{{sel.toggleRequired}}" style="width: 18px; height: 18px; margin: 0; accent-color: #0B6E4F"><span>Required</span></label>
+
+<sc-if value="{{sel.isChoice}}" hint-placeholder-val="{{ false }}">
+<div style="display: flex; flex-direction: column; gap: 8px; padding-top: 12px; border-top: 1px solid #ECEEE9">
+<span style="font-size: 12px; font-weight: 500; color: #4C535C">Options</span>
+<sc-for list="{{sel.options}}" as="o" hint-placeholder-count="5">
+<div style="display: flex; align-items: center; gap: 8px">
+<input type="text" aria-label="{{o.aria}}" value="{{o.label}}" onChange="{{o.setLabel}}" style="flex: 1; min-width: 0; font: inherit; min-height: 44px; box-sizing: border-box; padding: 0 12px; border: 1px solid #C9CDC6; border-radius: 8px; color: #15181C">
+<button type="button" aria-label="{{o.removeAria}}" onClick="{{o.remove}}" style="width: 44px; height: 44px; border-radius: 8px; border: 1px solid #DDE0DA; background: #FFFFFF; color: #4C535C; cursor: pointer"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M2 2l8 8M10 2l-8 8"></path></svg></button>
+</div>
+</sc-for>
+<button type="button" onClick="{{sel.addOption}}" style="align-self: flex-start; min-height: 40px; padding: 0 12px; border-radius: 8px; border: 1px dashed #B9BEB6; background: #FFFFFF; color: #15181C; font: inherit; font-size: 13px; cursor: pointer">+ Add option</button>
+</div>
+</sc-if>
+
+<sc-if value="{{sel.isLocation}}" hint-placeholder-val="{{ true }}">
+<div style="display: flex; flex-direction: column; gap: 14px; padding-top: 12px; border-top: 1px solid #ECEEE9">
+<fieldset style="border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px">
+<legend style="font-size: 12px; font-weight: 500; color: #4C535C; padding: 0; margin-bottom: 6px">Submitters can set it by</legend>
+<label style="display: flex; gap: 10px; align-items: center; min-height: 32px; cursor: pointer"><input type="checkbox" checked style="width: 18px; height: 18px; margin: 0; accent-color: #0B6E4F"><span>Reading it from a photo</span></label>
+<label style="display: flex; gap: 10px; align-items: center; min-height: 32px; cursor: pointer"><input type="checkbox" checked style="width: 18px; height: 18px; margin: 0; accent-color: #0B6E4F"><span>Picking a point on a map</span></label>
+<label style="display: flex; gap: 10px; align-items: center; min-height: 32px; cursor: pointer"><input type="checkbox" checked style="width: 18px; height: 18px; margin: 0; accent-color: #0B6E4F"><span>Typing coordinates</span></label>
+</fieldset>
+<fieldset style="border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px">
+<legend style="font-size: 12px; font-weight: 500; color: #4C535C; padding: 0; margin-bottom: 6px">What gets stored</legend>
+<sc-for list="{{precisionOpts}}" as="p" hint-placeholder-count="2">
+<label style="display: flex; gap: 10px; align-items: flex-start; padding: 11px; border: 2px solid {{p.border}}; background: {{p.bg}}; border-radius: 10px; cursor: pointer">
+<input type="radio" name="fs-precision" checked="{{p.checked}}" onChange="{{p.pick}}" style="width: 18px; height: 18px; margin: 1px 0 0; accent-color: #0B6E4F">
+<div style="display: flex; flex-direction: column; gap: 2px"><span style="font-weight: 600">{{p.label}}</span><span style="font-size: 12px; color: #4C535C">{{p.desc}}</span></div>
+</label>
+</sc-for>
+</fieldset>
+<span style="font-size: 12px; color: #646B73">Data is public, so the stored location is what everyone sees. Rounding happens on the submitter's computer before anything is saved.</span>
+</div>
+</sc-if>
+
+<sc-if value="{{sel.isPhoto}}" hint-placeholder-val="{{ false }}">
+<div style="display: flex; flex-direction: column; gap: 12px; padding-top: 12px; border-top: 1px solid #ECEEE9">
+<div style="display: flex; gap: 12px">
+<div style="flex: 1; display: flex; flex-direction: column; gap: 6px"><label for="fs-pmin" style="font-size: 12px; font-weight: 500; color: #4C535C">At least</label><input id="fs-pmin" type="number" value="1" style="font: inherit; min-height: 44px; box-sizing: border-box; padding: 0 12px; border: 1px solid #C9CDC6; border-radius: 8px; color: #15181C"></div>
+<div style="flex: 1; display: flex; flex-direction: column; gap: 6px"><label for="fs-pmax" style="font-size: 12px; font-weight: 500; color: #4C535C">At most</label><input id="fs-pmax" type="number" value="5" style="font: inherit; min-height: 44px; box-sizing: border-box; padding: 0 12px; border: 1px solid #C9CDC6; border-radius: 8px; color: #15181C"></div>
+</div>
+<label style="display: flex; gap: 10px; align-items: flex-start; cursor: pointer"><input type="checkbox" checked style="width: 18px; height: 18px; margin: 2px 0 0; accent-color: #0B6E4F"><span>Fill location and time from the photo when it has them</span></label>
+<label style="display: flex; gap: 10px; align-items: flex-start"><input type="checkbox" checked disabled style="width: 18px; height: 18px; margin: 2px 0 0; accent-color: #0B6E4F"><span>Remove hidden metadata (camera, GPS) from photo files <span style="color: #646B73">(always on)</span></span></label>
+</div>
+</sc-if>
+
+<sc-if value="{{sel.isNumber}}" hint-placeholder-val="{{ false }}">
+<div style="display: flex; flex-direction: column; gap: 12px; padding-top: 12px; border-top: 1px solid #ECEEE9">
+<div style="display: flex; gap: 12px">
+<div style="flex: 1; display: flex; flex-direction: column; gap: 6px"><label for="fs-nmin" style="font-size: 12px; font-weight: 500; color: #4C535C">Minimum</label><input id="fs-nmin" type="number" value="1" style="font: inherit; min-height: 44px; box-sizing: border-box; padding: 0 12px; border: 1px solid #C9CDC6; border-radius: 8px; color: #15181C"></div>
+<div style="flex: 1; display: flex; flex-direction: column; gap: 6px"><label for="fs-nmax" style="font-size: 12px; font-weight: 500; color: #4C535C">Maximum</label><input id="fs-nmax" type="number" placeholder="None" style="font: inherit; min-height: 44px; box-sizing: border-box; padding: 0 12px; border: 1px solid #C9CDC6; border-radius: 8px; color: #15181C"></div>
+</div>
+<div style="display: flex; flex-direction: column; gap: 6px"><label for="fs-unit" style="font-size: 12px; font-weight: 500; color: #4C535C">Unit</label><input id="fs-unit" type="text" value="individuals" style="font: inherit; min-height: 44px; box-sizing: border-box; padding: 0 12px; border: 1px solid #C9CDC6; border-radius: 8px; color: #15181C"></div>
+<label style="display: flex; gap: 10px; align-items: center; min-height: 32px; cursor: pointer"><input type="checkbox" checked style="width: 18px; height: 18px; margin: 0; accent-color: #0B6E4F"><span>Whole numbers only</span></label>
+</div>
+</sc-if>
+
+<sc-if value="{{sel.isDate}}" hint-placeholder-val="{{ false }}">
+<div style="display: flex; flex-direction: column; gap: 8px; padding-top: 12px; border-top: 1px solid #ECEEE9">
+<label style="display: flex; gap: 10px; align-items: flex-start; cursor: pointer"><input type="checkbox" checked style="width: 18px; height: 18px; margin: 2px 0 0; accent-color: #0B6E4F"><span>Fill from the photo time, else the current time</span></label>
+<label style="display: flex; gap: 10px; align-items: flex-start; cursor: pointer"><input type="checkbox" checked style="width: 18px; height: 18px; margin: 2px 0 0; accent-color: #0B6E4F"><span>Cannot be in the future</span></label>
+</div>
+</sc-if>
+</div>
+</sc-if>
+<sc-if value="{{noSel}}" hint-placeholder-val="{{ false }}">
+<p style="margin: 0; color: #4C535C">Add a field to start building the form.</p>
+</sc-if>
+</section>
+
+<section aria-labelledby="prev-h" style="background: #FFFFFF; border: 1px solid #DDE0DA; border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 14px">
+<div style="display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap">
+<h2 id="prev-h" style="margin: 0; font-size: 16px; font-weight: 600">Form preview</h2>
+<span style="font-size: 12px; color: #646B73">What submitters see</span>
+</div>
+<div style="border: 1px solid #DDE0DA; border-radius: 12px; padding: 16px; background: #F5F6F3; display: flex; flex-direction: column; gap: 12px">
+<span style="font-weight: 600">Wildlife sighting</span>
+<div style="padding: 10px 12px; border-radius: 8px; background: #E3F1EB; font-size: 12px; color: #15181C; white-space: pre-line">{{instructions}}</div>
+<sc-for list="{{rows}}" as="f" hint-placeholder-count="9">
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 10px; border-radius: 8px; background: {{f.previewBg}}; border: 1px solid {{f.previewBorder}}">
+<span style="font-size: 12px; font-weight: 500; color: #15181C">{{f.label}} <span style="font-weight: 400; color: #646B73">{{f.reqHint}}</span></span>
+<sc-if value="{{f.isPhoto}}" hint-placeholder-val="{{ false }}"><div style="height: 56px; border: 1px dashed #B9BEB6; border-radius: 8px; background: #FFFFFF; display: flex; align-items: center; justify-content: center; font-size: 12px; color: #4C535C">Drop photos or choose files</div></sc-if>
+<sc-if value="{{f.isLocation}}" hint-placeholder-val="{{ false }}"><div style="height: 64px; border-radius: 8px; background: #E3EADF; position: relative"><span aria-hidden="true" style="position: absolute; left: 50%; top: 50%; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; background: #0B6E4F; border: 2px solid #FFFFFF; box-sizing: border-box"></span></div></sc-if>
+<sc-if value="{{f.isChoiceLike}}" hint-placeholder-val="{{ false }}"><div style="display: flex; flex-wrap: wrap; gap: 6px"><sc-for list="{{f.options}}" as="o" hint-placeholder-count="4"><span style="font-size: 12px; padding: 4px 10px; border-radius: {{f.optRadius}}; border: 1px solid #C9CDC6; background: #FFFFFF">{{o.label}}</span></sc-for></div></sc-if>
+<sc-if value="{{f.isInputLike}}" hint-placeholder-val="{{ false }}"><div style="height: 36px; border: 1px solid #C9CDC6; border-radius: 8px; background: #FFFFFF; display: flex; align-items: center; padding: 0 10px; font-size: 12px; color: #646B73">{{f.placeholder}}</div></sc-if>
+<sc-if value="{{f.isLong}}" hint-placeholder-val="{{ false }}"><div style="height: 56px; border: 1px solid #C9CDC6; border-radius: 8px; background: #FFFFFF"></div></sc-if>
+<sc-if value="{{f.hasHelp}}" hint-placeholder-val="{{ false }}"><span style="font-size: 11px; color: #646B73">{{f.help}}</span></sc-if>
+</div>
+</sc-for>
+<div style="align-self: flex-end; min-height: 36px; display: flex; align-items: center; padding: 0 14px; border-radius: 8px; background: #0B6E4F; color: #FFFFFF; font-size: 13px; font-weight: 600">Submit</div>
+</div>
+</section>
+
+</aside>
+</div>
+</main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":1960}}'>
+class Component extends DCLogic {
+renderVals() {
+var self = this;
+var s = this.state || {};
+var typeNames = { text: 'Short text', longtext: 'Long text', number: 'Number', choice: 'Single choice', multi: 'Multiple choice', datetime: 'Date and time', photo: 'Photo', location: 'Location', yesno: 'Yes or no' };
+var opt = function (l) { return { label: l }; };
+var base = [
+{ id: 'photos', type: 'photo', label: 'Photos', help: 'Up to 5 clear photos of the animal.', required: true },
+{ id: 'category', type: 'choice', label: 'Category', help: '', required: true, options: [opt('Birds'), opt('Mammals'), opt('Reptiles'), opt('Amphibians'), opt('Insects'), opt('Other')] },
+{ id: 'species', type: 'text', label: 'Species, if you know it', help: 'Common or scientific name.', required: false },
+{ id: 'count', type: 'number', label: 'How many', help: '', required: true },
+{ id: 'location', type: 'location', label: 'Location', help: 'Where you saw it, not where you are now.', required: true },
+{ id: 'observed', type: 'datetime', label: 'Date and time', help: '', required: true },
+{ id: 'behaviour', type: 'multi', label: 'What was it doing?', help: 'Select all that apply.', required: false, options: [opt('Feeding'), opt('Flying'), opt('Nesting'), opt('Resting'), opt('Calling')] },
+{ id: 'notes', type: 'longtext', label: 'Notes', help: 'Habitat, weather, anything unusual.', required: false }
+];
+var v2 = ['photos', 'category', 'species', 'count', 'location', 'observed', 'notes'];
+var fields = s.fields || base;
+var selId = s.sel !== undefined ? s.sel : 'location';
+var precision = s.precision || 'exact';
+var instructions = s.instructions != null ? s.instructions : 'Record any animal you see inside the study area. Photograph it before you approach, and never disturb nests or roosts.\nOne submission per group of the same species.';
+
+var save = function (next, extra) { self.setState(Object.assign({ fields: next }, extra || {})); };
+var patch = function (id, p) { save(fields.map(function (f) { return f.id === id ? Object.assign({}, f, p) : f; })); };
+var move = function (i, d) { var j = i + d; if (j < 0 || j >= fields.length) { return; } var next = fields.slice(); var t = next[i]; next[i] = next[j]; next[j] = t; save(next); };
+var removeField = function (id) { var next = fields.filter(function (f) { return f.id !== id; }); save(next, { sel: id === selId ? (next.length ? next[0].id : null) : selId }); };
+
+var placeholders = { text: 'Short answer', number: 'Number', datetime: '28 Oct 2026, 07:42' };
+var rows = fields.map(function (f, i) {
+var on = f.id === selId;
+var options = f.type === 'yesno' ? [opt('Yes'), opt('No')] : (f.options || []);
+return {
+num: i + 1, label: f.label || 'Untitled field', typeName: typeNames[f.type],
+reqText: f.required ? 'Required' : 'Optional', reqBg: f.required ? '#E6EAF0' : '#F5F6F3', reqFg: f.required ? '#3D4A5C' : '#646B73',
+reqHint: f.required ? '' : '(optional)', isNew: v2.indexOf(f.id) < 0,
+pressed: on ? 'true' : 'false', border: on ? '#4B3FB0' : '#DDE0DA', borderW: on ? '2px' : '1px', bg: on ? '#ECEAFB' : '#FFFFFF', pad: on ? '3px 5px' : '4px 6px',
+previewBg: on ? '#ECEAFB' : '#FFFFFF', previewBorder: on ? '#4B3FB0' : '#DDE0DA',
+select: function () { self.setState({ sel: f.id }); },
+up: function () { move(i, -1); }, down: function () { move(i, 1); }, remove: function () { removeField(f.id); },
+upLabel: 'Move ' + f.label + ' up', downLabel: 'Move ' + f.label + ' down', removeLabel: 'Remove ' + f.label,
+isPhoto: f.type === 'photo', isLocation: f.type === 'location',
+isChoiceLike: f.type === 'choice' || f.type === 'multi' || f.type === 'yesno', options: options, optRadius: f.type === 'multi' ? '6px' : '999px',
+isInputLike: !!placeholders[f.type], placeholder: placeholders[f.type] || '', isLong: f.type === 'longtext',
+help: f.help, hasHelp: !!f.help
+};
+});
+
+var selField = fields.filter(function (f) { return f.id === selId; })[0];
+var sel = { label: 'No field selected', typeName: '—' };
+if (selField) {
+sel = {
+label: selField.label, help: selField.help || '', required: !!selField.required, typeName: typeNames[selField.type],
+setLabel: function (e) { patch(selField.id, { label: e.target.value }); },
+setHelp: function (e) { patch(selField.id, { help: e.target.value }); },
+toggleRequired: function () { patch(selField.id, { required: !selField.required }); },
+isChoice: selField.type === 'choice' || selField.type === 'multi',
+options: (selField.options || []).map(function (o, oi) {
+return {
+label: o.label, aria: 'Option ' + (oi + 1), removeAria: 'Remove option ' + o.label,
+setLabel: function (e) { var v = e.target.value; patch(selField.id, { options: selField.options.map(function (x, xi) { return xi === oi ? { label: v } : x; }) }); },
+remove: function () { patch(selField.id, { options: selField.options.filter(function (x, xi) { return xi !== oi; }) }); }
+};
+}),
+addOption: function () { patch(selField.id, { options: (selField.options || []).concat([opt('Option ' + ((selField.options || []).length + 1))]) }); },
+isLocation: selField.type === 'location', isPhoto: selField.type === 'photo', isNumber: selField.type === 'number', isDate: selField.type === 'datetime'
+};
+}
+
+var nextN = s.nextN || 1;
+var palette = ['text', 'longtext', 'number', 'choice', 'multi', 'datetime', 'photo', 'location', 'yesno'].map(function (t) {
+return { label: typeNames[t], add: function () {
+var id = 'new' + nextN;
+var f = { id: id, type: t, label: typeNames[t] + ' field', help: '', required: false };
+if (t === 'choice' || t === 'multi') { f.options = [opt('Option 1'), opt('Option 2')]; }
+save(fields.concat([f]), { sel: id, nextN: nextN + 1 });
+} };
+});
+
+var precisionOpts = [
+{ id: 'exact', label: 'Exact point', desc: 'Best for research. Everyone can see where each record was made.' },
+{ id: 'rounded', label: 'Rounded to about 1 km', desc: 'Use when an exact spot could put people, nests or rare species at risk.' }
+].map(function (p) { var on = precision === p.id; return { label: p.label, desc: p.desc, checked: on, border: on ? '#0B6E4F' : '#DDE0DA', bg: on ? '#F3F9F6' : '#FFFFFF', pick: function () { self.setState({ precision: p.id }); } }; });
+
+return {
+instructions: instructions, setInstructions: function (e) { self.setState({ instructions: e.target.value }); },
+fieldCount: fields.length, rows: rows, palette: palette, sel: sel, hasSel: !!selField, noSel: !selField,
+precisionOpts: precisionOpts
+};
+}
+}
+</script>
+</body>
+</html>

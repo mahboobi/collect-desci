@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Collect · Edit experiment</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#F5F6F3}
+a{color:#0B6E4F}a:hover{color:#08523B}
+</style>
+</helmet>
+<div style="min-height: 100vh; background: #F5F6F3; color: #15181C; font-family: 'IBM Plex Sans', system-ui, sans-serif; font-size: 14px; line-height: 1.45">
+
+<header style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 32px; background: #FFFFFF; border-bottom: 1px solid #DDE0DA">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 28px">
+<div style="display: flex; align-items: center; gap: 10px">
+<svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true"><rect width="28" height="28" rx="7" fill="#0B6E4F"></rect><path d="M8 9.5h12M8 14h12M8 18.5h7" stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round"></path><circle cx="20" cy="18.5" r="2" fill="#FFFFFF"></circle></svg>
+<div style="display: flex; flex-direction: column; line-height: 1.2"><span style="font-weight: 600; font-size: 15px">Collect</span><span style="font-size: 12px; color: #646B73">on Logos Basecamp</span></div>
+</div>
+<nav aria-label="Collect" style="display: flex; gap: 4px">
+<a href="Main.dc.html" aria-current="page" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 14px; border-radius: 8px; text-decoration: none; background: #E3F1EB; color: #0B6E4F; font-weight: 600">Experiments</a>
+<a href="Join.dc.html" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 14px; border-radius: 8px; text-decoration: none; color: #15181C">Open a link</a>
+</nav>
+</div>
+<span style="display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: #4C535C"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; background: #0B6E4F"></span>Logos Storage online · testnet v0.3</span>
+</header>
+
+<main style="max-width: 1120px; margin: 0 auto; box-sizing: border-box; padding: 24px 32px 48px; display: flex; flex-direction: column; gap: 20px">
+
+<nav aria-label="Breadcrumb" style="font-size: 13px; color: #646B73; display: flex; gap: 6px; flex-wrap: wrap"><a href="Main.dc.html">Experiments</a><span aria-hidden="true">/</span><span style="color: #15181C">Urban wildlife sightings</span></nav>
+
+<div style="display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px">
+<div style="display: flex; flex-direction: column; gap: 8px">
+<h1 style="margin: 0; font-size: 28px; line-height: 1.2; font-weight: 600; letter-spacing: -0.01em">Edit experiment</h1>
+<div style="display: flex; flex-wrap: wrap; gap: 6px"><span style="font-size: 12px; font-weight: 500; padding: 2px 8px; border-radius: 999px; background: #E3F1EB; color: #0B6E4F">Open · collecting</span><span style="font-size: 12px; font-weight: 500; padding: 2px 8px; border-radius: 999px; background: #E6EAF0; color: #3D4A5C">Published version 4</span></div>
+</div>
+<div style="display: flex; flex-wrap: wrap; gap: 8px">
+<a href="Join.dc.html" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 18px; border-radius: 8px; border: 1px solid #C9CDC6; background: #FFFFFF; color: #15181C; font-weight: 500; text-decoration: none">Preview as submitter</a>
+<button type="button" disabled="{{hasError}}" style="min-height: 44px; padding: 0 20px; border-radius: 8px; border: 1px solid #0B6E4F; background: #0B6E4F; color: #FFFFFF; font: inherit; font-weight: 600; cursor: pointer; opacity: {{saveOpacity}}">Save and publish</button>
+</div>
+</div>
+
+<div style="display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start">
+
+<div style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; gap: 16px">
+
+<section aria-labelledby="d-h" style="background: #FFFFFF; border: 1px solid #DDE0DA; border-radius: 12px; padding: 24px; display: flex; flex-direction: column; gap: 16px">
+<h2 id="d-h" style="margin: 0; font-size: 16px; font-weight: 600">Details</h2>
+<div style="display: flex; flex-direction: column; gap: 6px">
+<label for="e-title" style="font-size: 12px; font-weight: 500; color: #4C535C">Title</label>
+<input id="e-title" type="text" value="Urban wildlife sightings" style="font: inherit; font-size: 16px; min-height: 44px; box-sizing: border-box; padding: 0 12px; border: 1px solid #C9CDC6; border-radius: 8px; color: #15181C">
+</div>
+<div style="display: flex; flex-direction: column; gap: 6px">
+<label for="e-desc" style="font-size: 12px; font-weight: 500; color: #4C535C">Description</label>
+<textarea id="e-desc" rows="4" style="font: inherit; padding: 10px 12px; border: 1px solid #C9CDC6; border-radius: 8px; resize: vertical; color: #15181C">We are mapping which animals live around four lakes and parks in central Bengaluru. Every sighting helps us compare lake edges with park lawns. Submissions are public and help anyone studying urban wildlife.</textarea>
+<span style="font-size: 12px; color: #646B73">Submitters see this on the experiment page.</span>
+</div>
+<div style="display: flex; flex-wrap: wrap; gap: 16px">
+<div style="flex: 1 1 200px; display: flex; flex-direction: column; gap: 6px">
+<label for="e-start" style="font-size: 12px; font-weight: 500; color: #4C535C">Start date</label>
+<input id="e-start" type="date" value="{{start}}" onChange="{{setStart}}" style="font: inherit; min-height: 44px; box-sizing: border-box; padding: 0 12px; border: 1px solid #C9CDC6; border-radius: 8px; color: #15181C">
+</div>
+<div style="flex: 1 1 200px; display: flex; flex-direction: column; gap: 6px">
+<label for="e-end" style="font-size: 12px; font-weight: 500; color: #4C535C">End date</label>
+<input id="e-end" type="date" value="{{end}}" onChange="{{setEnd}}" style="font: inherit; min-height: 44px; box-sizing: border-box; padding: 0 12px; border: 1px solid {{endBorder}}; border-radius: 8px; color: #15181C">
+</div>
+<div style="flex: 1 1 200px; display: flex; flex-direction: column; gap: 6px">
+<label for="e-tz" style="font-size: 12px; font-weight: 500; color: #4C535C">Time zone</label>
+<select id="e-tz" style="font: inherit; min-height: 44px; padding: 0 10px; border: 1px solid #C9CDC6; border-radius: 8px; background: #FFFFFF; color: #15181C"><option>Asia/Kolkata (UTC+05:30)</option><option>UTC</option></select>
+</div>
+</div>
+<span style="font-size: 13px; color: {{windowFg}}">{{windowText}}</span>
+</section>
+
+<section aria-labelledby="p-h" style="background: #FFFFFF; border: 1px solid #DDE0DA; border-radius: 12px; padding: 24px; display: flex; flex-direction: column; gap: 14px">
+<div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px">
+<h2 id="p-h" style="margin: 0; font-size: 16px; font-weight: 600">Protocols ({{protocolCount}})</h2>
+<span style="font-size: 12px; color: #646B73">Each protocol is one form. Submitters choose which one to fill in.</span>
+</div>
+<ul style="list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px">
+<sc-for list="{{protocols}}" as="p" hint-placeholder-count="3">
+<li style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid #DDE0DA; border-radius: 10px">
+<div style="flex: 1 1 240px; min-width: 0; display: flex; flex-direction: column; gap: 2px">
+<span style="font-weight: 600">{{p.name}}</span>
+<span style="font-size: 12px; color: #646B73">{{p.meta}}</span>
+</div>
+<span style="font-size: 12px; font-weight: 500; padding: 2px 8px; border-radius: 999px; background: {{p.chipBg}}; color: {{p.chipFg}}">{{p.status}}</span>
+<a href="Builder.dc.html" aria-label="{{p.editAria}}" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 14px; border-radius: 8px; border: 1px solid #C9CDC6; background: #FFFFFF; color: #15181C; font-weight: 500; text-decoration: none">Edit</a>
+<sc-if value="{{p.canToggle}}" hint-placeholder-val="{{ true }}"><button type="button" onClick="{{p.toggle}}" style="min-height: 44px; padding: 0 14px; border-radius: 8px; border: 1px solid #C9CDC6; background: #FFFFFF; color: #15181C; font: inherit; font-weight: 500; cursor: pointer">{{p.toggleLabel}}</button></sc-if>
+</li>
+</sc-for>
+</ul>
+<a href="Builder.dc.html" style="align-self: flex-start; display: inline-flex; align-items: center; min-height: 44px; padding: 0 16px; border-radius: 8px; border: 1px dashed #B9BEB6; background: #FFFFFF; color: #15181C; font-weight: 500; text-decoration: none">+ Add protocol</a>
+</section>
+
+</div>
+
+<aside style="flex: 1 1 320px; min-width: 0; display: flex; flex-direction: column; gap: 16px">
+
+<section aria-labelledby="s-h" style="background: #FFFFFF; border: 1px solid #DDE0DA; border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 12px">
+<h2 id="s-h" style="margin: 0; font-size: 16px; font-weight: 600">Share</h2>
+<div style="padding: 10px 12px; background: #F5F6F3; border: 1px solid #DDE0DA; border-radius: 8px; font-family: 'IBM Plex Mono', monospace; font-size: 12px; word-break: break-all">logos-collect://exp/7k2m9q4xw3</div>
+<button type="button" onClick="{{copy}}" style="align-self: flex-start; min-height: 44px; padding: 0 16px; border-radius: 8px; border: 1px solid #0B6E4F; background: {{copyBg}}; color: {{copyFg}}; font: inherit; font-weight: 600; cursor: pointer">{{copyLabel}}</button>
+<ul style="margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; color: #4C535C; font-size: 13px">
+<li>Anyone with this link can read every submission.</li>
+<li>Only people using Basecamp can submit.</li>
+</ul>
+</section>
+
+<section aria-labelledby="w-h" style="background: #FBEFD9; border: 1px solid #8A4B00; border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 8px">
+<h2 id="w-h" style="margin: 0; font-size: 16px; font-weight: 600; color: #8A4B00">All data is public</h2>
+<p style="margin: 0; color: #15181C">Submissions are stored unencrypted on Logos Storage and cannot be recalled. Do not ask for names, phone numbers, home addresses or anything else that identifies a person.</p>
+</section>
+
+<section aria-labelledby="st-h" style="background: #FFFFFF; border: 1px solid #DDE0DA; border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 8px">
+<h2 id="st-h" style="margin: 0; font-size: 16px; font-weight: 600">Storage</h2>
+<span>Your node keeps a copy of every submission: 3.1 GB.</span>
+<span style="font-size: 13px; color: #4C535C">Copies on the network: 4. Keep Basecamp running, or add an always-on node, so new submissions are picked up.</span>
+</section>
+
+</aside>
+</div>
+</main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":1320}}'>
+class Component extends DCLogic {
+renderVals() {
+var self = this;
+var s = this.state || {};
+var start = s.start || '2026-10-12';
+var end = s.end || '2026-12-31';
+var bad = end < start;
+var days = Math.round((Date.parse(end) - Date.parse(start)) / 864e5) + 1;
+var statusMap = s.status || { sighting: 'open', nest: 'open', camera: 'draft' };
+var chip = { open: ['Open', '#E3F1EB', '#0B6E4F'], closed: ['Closed', '#E6EAF0', '#3D4A5C'], draft: ['Draft', '#FBEFD9', '#8A4B00'] };
+var defs = [
+{ id: 'sighting', name: 'Wildlife sighting', meta: '9 fields · version 2 · 1,284 submissions' },
+{ id: 'nest', name: 'Nest monitoring', meta: '7 fields · version 1 · 128 submissions' },
+{ id: 'camera', name: 'Camera trap upload', meta: '5 fields · not published' }
+];
+var protocols = defs.map(function (d) {
+var st = statusMap[d.id];
+var c = chip[st];
+return {
+name: d.name, meta: d.meta, status: c[0], chipBg: c[1], chipFg: c[2], editAria: 'Edit ' + d.name,
+canToggle: st !== 'draft', toggleLabel: st === 'open' ? 'Close' : 'Reopen',
+toggle: function () { var next = Object.assign({}, statusMap); next[d.id] = st === 'open' ? 'closed' : 'open'; self.setState({ status: next }); }
+};
+});
+var copied = !!s.copied;
+return {
+start: start, end: end,
+setStart: function (e) { self.setState({ start: e.target.value }); },
+setEnd: function (e) { self.setState({ end: e.target.value }); },
+hasError: bad, saveOpacity: bad ? '0.45' : '1', endBorder: bad ? '#8A4B00' : '#C9CDC6',
+windowText: bad ? 'The end date is before the start date.' : ('Submissions are accepted for ' + days + ' days, from the start of the first day to the end of the last, in this time zone.'),
+windowFg: bad ? '#8A4B00' : '#4C535C',
+protocols: protocols, protocolCount: protocols.length,
+copy: function () { self.setState({ copied: true }); },
+copyLabel: copied ? 'Link copied' : 'Copy link', copyBg: copied ? '#E3F1EB' : '#0B6E4F', copyFg: copied ? '#0B6E4F' : '#FFFFFF'
+};
+}
+}
+</script>
+</body>
+</html>

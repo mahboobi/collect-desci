@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Collect · Wildlife sighting form</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#F5F6F3}
+a{color:#0B6E4F}a:hover{color:#08523B}
+</style>
+</helmet>
+<div style="min-height: 100vh; background: #F5F6F3; color: #15181C; font-family: 'IBM Plex Sans', system-ui, sans-serif; font-size: 14px; line-height: 1.45">
+
+<header style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 32px; background: #FFFFFF; border-bottom: 1px solid #DDE0DA">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 28px">
+<div style="display: flex; align-items: center; gap: 10px">
+<svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true"><rect width="28" height="28" rx="7" fill="#0B6E4F"></rect><path d="M8 9.5h12M8 14h12M8 18.5h7" stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round"></path><circle cx="20" cy="18.5" r="2" fill="#FFFFFF"></circle></svg>
+<div style="display: flex; flex-direction: column; line-height: 1.2"><span style="font-weight: 600; font-size: 15px">Collect</span><span style="font-size: 12px; color: #646B73">on Logos Basecamp</span></div>
+</div>
+<nav aria-label="Collect" style="display: flex; gap: 4px">
+<a href="Main.dc.html" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 14px; border-radius: 8px; text-decoration: none; color: #15181C">Experiments</a>
+<a href="Join.dc.html" aria-current="page" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 14px; border-radius: 8px; text-decoration: none; background: #E3F1EB; color: #0B6E4F; font-weight: 600">Open a link</a>
+</nav>
+</div>
+<span style="display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: #4C535C"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; background: #0B6E4F"></span>Logos Storage online · testnet v0.3</span>
+</header>
+
+<main style="max-width: 760px; margin: 0 auto; box-sizing: border-box; padding: 24px 32px 48px; display: flex; flex-direction: column; gap: 20px">
+
+<nav aria-label="Breadcrumb" style="font-size: 13px; color: #646B73; display: flex; gap: 6px; flex-wrap: wrap"><a href="Join.dc.html">Urban wildlife sightings</a><span aria-hidden="true">/</span><span style="color: #15181C">Wildlife sighting</span></nav>
+
+<sc-if value="{{editing}}" hint-placeholder-val="{{ true }}">
+<form style="display: flex; flex-direction: column; gap: 20px">
+
+<div style="display: flex; flex-direction: column; gap: 12px">
+<h1 style="margin: 0; font-size: 28px; line-height: 1.2; font-weight: 600; letter-spacing: -0.01em">Wildlife sighting</h1>
+<section aria-label="Instructions" style="padding: 16px 18px; border-radius: 12px; background: #E3F1EB; border: 1px solid #0B6E4F; display: flex; flex-direction: column; gap: 6px">
+<span style="font-size: 12px; font-weight: 600; color: #0B6E4F">Instructions from the creator</span>
+<p style="margin: 0; white-space: pre-line">Record any animal you see inside the study area. Photograph it before you approach, and never disturb nests or roosts.
+One submission per group of the same species.</p>
+</section>
+<span style="font-size: 13px; color: #4C535C">Fields marked "required" must be filled in. Form version 2.</span>
+</div>
+
+<div style="background: #FFFFFF; border: 1px solid #DDE0DA; border-radius: 12px; padding: 24px; display: flex; flex-direction: column; gap: 26px">
+
+<div style="display: flex; flex-direction: column; gap: 8px">
+<span style="font-weight: 600">Photos <span style="font-size: 12px; font-weight: 500; color: #646B73">· required · 1 to 5</span></span>
+<span style="font-size: 13px; color: #4C535C">Up to 5 clear photos of the animal.</span>
+<div style="display: flex; flex-wrap: wrap; gap: 12px">
+<sc-for list="{{photos}}" as="p" hint-placeholder-count="2">
+<div style="width: 150px; display: flex; flex-direction: column; gap: 4px">
+<div style="height: 108px; border-radius: 8px; background: #E3EADF; display: flex; align-items: center; justify-content: center"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#4C535C" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"></rect><circle cx="9" cy="10" r="1.6"></circle><path d="M21 16l-5-5-8 8"></path></svg></div>
+<span style="font-size: 12px; font-weight: 500">{{p.name}}</span>
+<span style="font-size: 12px; color: {{p.noteFg}}">{{p.note}}</span>
+</div>
+</sc-for>
+<button type="button" onClick="{{addPhoto}}" style="width: 150px; height: 108px; border-radius: 8px; border: 1px dashed #B9BEB6; background: #FFFFFF; color: #15181C; font: inherit; font-weight: 500; cursor: pointer">+ Add photos</button>
+</div>
+<span style="font-size: 12px; color: #646B73">Hidden metadata such as camera model and GPS is removed from photos before they are saved.</span>
+</div>
+
+<fieldset style="border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px">
+<legend style="padding: 0; margin-bottom: 8px; font-weight: 600">Category <span style="font-size: 12px; font-weight: 500; color: #646B73">· required</span></legend>
+<div style="display: flex; flex-wrap: wrap; gap: 8px">
+<sc-for list="{{cats}}" as="c" hint-placeholder-count="6">
+<label style="display: flex; align-items: center; gap: 8px; min-height: 44px; box-sizing: border-box; padding: 0 14px; border: 2px solid {{c.border}}; background: {{c.bg}}; border-radius: 999px; cursor: pointer">
+<input type="radio" name="f-cat" checked="{{c.checked}}" onChange="{{c.pick}}" style="width: 18px; height: 18px; margin: 0; accent-color: #0B6E4F">
+<span style="font-weight: 500">{{c.label}}</span>
+</label>
+</sc-for>
+</div>
+</fieldset>
+
+<div style="display: flex; flex-direction: column; gap: 6px">
+<label for="f-species" style="font-weight: 600">Species, if you know it <span style="font-size: 12px; font-weight: 500; color: #646B73">· optional</span></label>
+<input id="f-species" type="text" value="{{species}}" onChange="{{setSpecies}}" placeholder="Common or scientific name" style="font: inherit; min-height: 44px; box-sizing: border-box; padding: 0 12px; border: 1px solid #C9CDC6; border-radius: 8px; color: #15181C">
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 6px">
+<span id="f-count-l" style="font-weight: 600">How many <span style="font-size: 12px; font-weight: 500; color: #646B73">· required</span></span>
+<div role="group" aria-labelledby="f-count-l" style="display: flex; align-items: center; gap: 8px">
+<button type="button" aria-label="One fewer" onClick="{{dec}}" style="width: 44px; height: 44px; border-radius: 8px; border: 1px solid #C9CDC6; background: #FFFFFF; color: #15181C; font: inherit; font-size: 18px; cursor: pointer">−</button>
+<input type="number" aria-label="How many" min="1" value="{{count}}" onChange="{{setCount}}" style="width: 88px; font-family: 'IBM Plex Mono', monospace; font-size: 15px; text-align: center; min-height: 44px; box-sizing: border-box; padding: 0 8px; border: 1px solid #C9CDC6; border-radius: 8px; color: #15181C">
+<button type="button" aria-label="One more" onClick="{{inc}}" style="width: 44px; height: 44px; border-radius: 8px; border: 1px solid #C9CDC6; background: #FFFFFF; color: #15181C; font: inherit; font-size: 18px; cursor: pointer">+</button>
+<span style="color: #4C535C">individuals</span>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px">
+<span style="font-weight: 600">Location <span style="font-size: 12px; font-weight: 500; color: #646B73">· required</span></span>
+<span style="font-size: 13px; color: #4C535C">Where you saw it, not where you are now.</span>
+<div role="group" aria-label="How to set the location" style="display: flex; flex-wrap: wrap; gap: 6px">
+<sc-for list="{{locModes}}" as="m" hint-placeholder-count="3">
+<button type="button" aria-pressed="{{m.pressed}}" onClick="{{m.pick}}" style="min-height: 40px; padding: 0 14px; border-radius: 999px; border: 1px solid {{m.border}}; background: {{m.bg}}; color: {{m.fg}}; font: inherit; font-size: 13px; font-weight: 500; cursor: pointer">{{m.label}}</button>
+</sc-for>
+</div>
+<div role="img" aria-label="Map with a pin at Cubbon Park, east lawn" style="position: relative; height: 200px; border-radius: 10px; overflow: hidden; background: #EEF1EA; border: 1px solid #DDE0DA">
+<span aria-hidden="true" style="position: absolute; left: 22%; top: 18%; width: 280px; height: 140px; border-radius: 50%; background: #DCE8D5"></span>
+<span aria-hidden="true" style="position: absolute; left: 4%; top: 62%; width: 160px; height: 70px; border-radius: 50%; background: #D3E3EE"></span>
+<span aria-hidden="true" style="position: absolute; left: 46%; top: 46%; width: 16px; height: 16px; margin: -8px 0 0 -8px; border-radius: 50%; background: #0B6E4F; border: 3px solid #FFFFFF; box-sizing: border-box"></span>
+<span aria-hidden="true" style="position: absolute; left: 46%; top: 46%; transform: translate(-50%, 16px); font-size: 12px; font-weight: 500; color: #3D4A5C; background: rgba(255, 255, 255, 0.9); padding: 1px 6px; border-radius: 4px; white-space: nowrap">Cubbon Park, east lawn</span>
+<span aria-hidden="true" style="position: absolute; right: 10px; bottom: 8px; font-size: 11px; color: #646B73; background: rgba(255, 255, 255, 0.85); padding: 1px 6px; border-radius: 4px">Schematic · the app draws real map tiles</span>
+</div>
+<sc-if value="{{isManual}}" hint-placeholder-val="{{ false }}">
+<div style="display: flex; flex-wrap: wrap; gap: 12px">
+<div style="flex: 1 1 160px; display: flex; flex-direction: column; gap: 6px"><label for="f-lat" style="font-size: 12px; font-weight: 500; color: #4C535C">Latitude</label><input id="f-lat" type="text" value="12.97712" style="font-family: 'IBM Plex Mono', monospace; font-size: 13px; min-height: 44px; box-sizing: border-box; padding: 0 12px; border: 1px solid #C9CDC6; border-radius: 8px; color: #15181C"></div>
+<div style="flex: 1 1 160px; display: flex; flex-direction: column; gap: 6px"><label for="f-lon" style="font-size: 12px; font-weight: 500; color: #4C535C">Longitude</label><input id="f-lon" type="text" value="77.59581" style="font-family: 'IBM Plex Mono', monospace; font-size: 13px; min-height: 44px; box-sizing: border-box; padding: 0 12px; border: 1px solid #C9CDC6; border-radius: 8px; color: #15181C"></div>
+</div>
+</sc-if>
+<div style="display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px"><span style="font-family: 'IBM Plex Mono', monospace; font-size: 13px">12.97712, 77.59581</span><span style="font-size: 12px; color: #0B6E4F">{{locSource}}</span></div>
+<span style="font-size: 12px; color: #646B73">This location will be public.</span>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 6px">
+<label for="f-time" style="font-weight: 600">Date and time <span style="font-size: 12px; font-weight: 500; color: #646B73">· required</span></label>
+<input id="f-time" type="datetime-local" value="2026-10-28T07:42" style="font: inherit; min-height: 44px; box-sizing: border-box; padding: 0 12px; border: 1px solid #C9CDC6; border-radius: 8px; color: #15181C; max-width: 280px">
+<span style="font-size: 12px; color: #0B6E4F">From IMG_3108.jpg</span>
+</div>
+
+<fieldset style="border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px">
+<legend style="padding: 0; margin-bottom: 4px; font-weight: 600">What was it doing? <span style="font-size: 12px; font-weight: 500; color: #646B73">· optional</span></legend>
+<span style="font-size: 13px; color: #4C535C">Select all that apply.</span>
+<div style="display: flex; flex-wrap: wrap; gap: 6px">
+<sc-for list="{{behaviours}}" as="b" hint-placeholder-count="5">
+<button type="button" aria-pressed="{{b.pressed}}" onClick="{{b.toggle}}" style="min-height: 40px; padding: 0 14px; border-radius: 6px; border: 1px solid {{b.border}}; background: {{b.bg}}; color: {{b.fg}}; font: inherit; font-size: 13px; font-weight: 500; cursor: pointer">{{b.label}}</button>
+</sc-for>
+</div>
+</fieldset>
+
+<div style="display: flex; flex-direction: column; gap: 6px">
+<label for="f-notes" style="font-weight: 600">Notes <span style="font-size: 12px; font-weight: 500; color: #646B73">· optional</span></label>
+<textarea id="f-notes" rows="3" placeholder="Habitat, weather, anything unusual." style="font: inherit; padding: 10px 12px; border: 1px solid #C9CDC6; border-radius: 8px; resize: vertical; color: #15181C"></textarea>
+</div>
+</div>
+
+<div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; padding: 16px 20px; background: #FFFFFF; border: 1px solid #DDE0DA; border-radius: 12px">
+<div style="display: flex; flex-direction: column; gap: 2px">
+<span style="font-size: 13px; font-weight: 500; color: {{readyFg}}">{{readyText}}</span>
+<span style="font-size: 12px; color: #646B73">Signed with your Basecamp key and saved publicly on Logos Storage.</span>
+</div>
+<div style="display: flex; flex-wrap: wrap; gap: 8px">
+<button type="button" style="min-height: 44px; padding: 0 18px; border-radius: 8px; border: 1px solid #C9CDC6; background: #FFFFFF; color: #15181C; font: inherit; font-weight: 500; cursor: pointer">Save draft</button>
+<button type="button" disabled="{{notReady}}" onClick="{{submit}}" style="min-height: 44px; padding: 0 22px; border-radius: 8px; border: 1px solid #0B6E4F; background: #0B6E4F; color: #FFFFFF; font: inherit; font-weight: 600; cursor: pointer; opacity: {{submitOpacity}}">Submit</button>
+</div>
+</div>
+
+</form>
+</sc-if>
+
+<sc-if value="{{done}}" hint-placeholder-val="{{ false }}">
+<section aria-labelledby="done-h" style="background: #FFFFFF; border: 2px solid #0B6E4F; border-radius: 14px; padding: 27px; display: flex; flex-direction: column; gap: 18px">
+<div style="display: flex; flex-direction: column; gap: 6px">
+<span style="font-size: 12px; font-weight: 600; color: #0B6E4F">Submitted</span>
+<h1 id="done-h" style="margin: 0; font-size: 24px; font-weight: 600">Thank you. Your sighting is saved.</h1>
+<span style="color: #4C535C">{{doneSummary}}</span>
+</div>
+<ol style="list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; border: 1px solid #DDE0DA; border-radius: 10px">
+<li style="display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-bottom: 1px solid #ECEEE9"><span aria-hidden="true" style="width: 12px; height: 12px; border-radius: 50%; background: #0B6E4F"></span><span style="flex: 1">Signed with your Basecamp key</span><span style="font-size: 12px; font-weight: 500; color: #0B6E4F">Done</span></li>
+<li style="display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-bottom: 1px solid #ECEEE9"><span aria-hidden="true" style="width: 12px; height: 12px; border-radius: 50%; background: #0B6E4F"></span><div style="flex: 1; display: flex; flex-direction: column"><span>Saved on Logos Storage</span><span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: #646B73">logos:zb2rhW4n…c71F</span></div><span style="font-size: 12px; font-weight: 500; color: #0B6E4F">Done</span></li>
+<li style="display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-bottom: 1px solid #ECEEE9"><span aria-hidden="true" style="width: 12px; height: 12px; border-radius: 50%; background: #0B6E4F"></span><span style="flex: 1">Announced to the experiment over Logos Messaging</span><span style="font-size: 12px; font-weight: 500; color: #0B6E4F">Done</span></li>
+<li style="display: flex; align-items: center; gap: 12px; padding: 12px 14px"><span aria-hidden="true" style="width: 12px; height: 12px; border-radius: 50%; box-sizing: border-box; border: 2px solid #4B3FB0; background: #FFFFFF"></span><span style="flex: 1">Received by the creator's node</span><span style="font-size: 12px; font-weight: 500; color: #4B3FB0">Waiting</span></li>
+</ol>
+<p style="margin: 0; font-size: 13px; color: #4C535C">Keep Basecamp open for a few minutes. If the creator's node is offline, your Basecamp keeps announcing the submission until it is received.</p>
+<div style="display: flex; flex-wrap: wrap; gap: 8px">
+<button type="button" onClick="{{again}}" style="min-height: 44px; padding: 0 20px; border-radius: 8px; border: 1px solid #0B6E4F; background: #0B6E4F; color: #FFFFFF; font: inherit; font-weight: 600; cursor: pointer">Submit another</button>
+<a href="Join.dc.html" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 18px; border-radius: 8px; border: 1px solid #C9CDC6; background: #FFFFFF; color: #15181C; font-weight: 500; text-decoration: none">Back to the experiment</a>
+</div>
+</section>
+</sc-if>
+
+</main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"startDone":{"editor":"boolean","default":false},"$preview":{"width":1280,"height":1900}}'>
+class Component extends DCLogic {
+renderVals() {
+var self = this;
+var s = this.state || {};
+var done = s.done != null ? s.done : !!this.props.startDone;
+var cat = s.cat !== undefined ? s.cat : (this.props.startDone ? 'Birds' : null);
+var species = s.species != null ? s.species : (this.props.startDone ? 'Indian peafowl' : '');
+var count = s.count != null ? s.count : (this.props.startDone ? 3 : 1);
+var nPhotos = s.nPhotos != null ? s.nPhotos : 2;
+var locMode = s.locMode || 'photo';
+var picked = s.beh || {};
+var photoDefs = [{ name: 'IMG_3108.jpg', note: 'Place and time read', noteFg: '#0B6E4F' }, { name: 'IMG_3109.jpg', note: '3.4 MB', noteFg: '#646B73' }, { name: 'IMG_3110.jpg', note: '2.9 MB', noteFg: '#646B73' }, { name: 'IMG_3111.jpg', note: '3.1 MB', noteFg: '#646B73' }, { name: 'IMG_3112.jpg', note: '3.0 MB', noteFg: '#646B73' }];
+var photos = photoDefs.slice(0, nPhotos);
+var cats = ['Birds', 'Mammals', 'Reptiles', 'Amphibians', 'Insects', 'Other'].map(function (c) {
+var on = cat === c;
+return { label: c, checked: on, border: on ? '#0B6E4F' : '#DDE0DA', bg: on ? '#F3F9F6' : '#FFFFFF', pick: function () { self.setState({ cat: c }); } };
+});
+var locModes = [{ id: 'photo', label: 'From photo' }, { id: 'map', label: 'Pick on map' }, { id: 'manual', label: 'Type coordinates' }].map(function (m) {
+var on = locMode === m.id;
+return { label: m.label, pressed: on ? 'true' : 'false', bg: on ? '#15181C' : '#FFFFFF', fg: on ? '#FFFFFF' : '#15181C', border: on ? '#15181C' : '#C9CDC6', pick: function () { self.setState({ locMode: m.id }); } };
+});
+var behaviours = ['Feeding', 'Flying', 'Nesting', 'Resting', 'Calling'].map(function (b) {
+var on = !!picked[b];
+return { label: b, pressed: on ? 'true' : 'false', bg: on ? '#ECEAFB' : '#FFFFFF', fg: on ? '#4B3FB0' : '#15181C', border: on ? '#4B3FB0' : '#C9CDC6', toggle: function () { var next = Object.assign({}, picked); next[b] = !on; self.setState({ beh: next }); } };
+});
+var missing = [];
+if (nPhotos < 1) { missing.push('a photo'); }
+if (!cat) { missing.push('a category'); }
+var ready = missing.length === 0;
+var setCount = function (n) { self.setState({ count: Math.max(1, n) }); };
+return {
+editing: !done, done: done,
+photos: photos, addPhoto: function () { self.setState({ nPhotos: Math.min(5, nPhotos + 1) }); },
+cats: cats, species: species, setSpecies: function (e) { self.setState({ species: e.target.value }); },
+count: count, setCount: function (e) { setCount(parseInt(e.target.value, 10) || 1); }, inc: function () { setCount(count + 1); }, dec: function () { setCount(count - 1); },
+locModes: locModes, isManual: locMode === 'manual',
+locSource: { photo: 'From IMG_3108.jpg · accurate to about 12 m', map: 'Placed on the map', manual: 'Typed by you' }[locMode],
+behaviours: behaviours,
+readyText: ready ? 'Ready to submit.' : ('Still needed: ' + missing.join(' and ') + '.'), readyFg: ready ? '#0B6E4F' : '#8A4B00',
+notReady: !ready, submitOpacity: ready ? '1' : '0.45',
+submit: function () { if (ready) { self.setState({ done: true }); } },
+doneSummary: (species || cat || 'Sighting') + ' · ' + count + ' · Cubbon Park, east lawn · 28 Oct 2026, 07:42 · Wildlife sighting, form version 2',
+again: function () { self.setState({ done: false, cat: null, species: '', count: 1, beh: {}, locMode: 'photo', nPhotos: 2 }); }
+};
+}
+}
+</script>
+</body>
+</html>

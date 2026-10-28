@@ -1,0 +1,32 @@
+[
+  {
+    "kind": "head",
+    "experiment": "q7k2m3x4w3b5n6tz",
+    "from": "3a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f21",
+    "at": "2026-10-28T07:51:00+05:30",
+    "manifest": "logos:zb2rhManifestV4",
+    "manifest_version": 4,
+    "index": "logos:zb2rhIndexP2",
+    "index_page": 2,
+    "sig": "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab"
+  },
+  {
+    "kind": "submission",
+    "experiment": "q7k2m3x4w3b5n6tz",
+    "from": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+    "at": "2026-10-28T07:50:13+05:30",
+    "cid": "logos:zb2rhSubW4n",
+    "protocol": "wildlife-sighting",
+    "version": 2,
+    "sig": "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab"
+  },
+  {
+    "kind": "receipt",
+    "experiment": "q7k2m3x4w3b5n6tz",
+    "from": "3a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f21",
+    "at": "2026-10-28T07:50:31+05:30",
+    "cid": "logos:zb2rhSubW4n",
+    "index_page": 2,
+    "sig": "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab"
+  }
+]
