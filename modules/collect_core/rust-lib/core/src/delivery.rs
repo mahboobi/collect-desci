@@ -346,6 +346,14 @@ impl MemoryCourier {
         self.subscribed.lock().map(|s| s.clone()).unwrap_or_default()
     }
 
+    /// Put any inbox item in, as the courier's listener would — for the
+    /// items that are not messages, such as a refused send.
+    pub fn arrive_raw(&self, item: Value) {
+        if let Ok(mut arrived) = self.arrived.lock() {
+            arrived.push(item);
+        }
+    }
+
     /// Put a message in the inbox, as Delivery would.
     pub fn arrive(&self, topic: &str, message_hash: &str, payload: &Value) {
         if let Ok(mut arrived) = self.arrived.lock() {

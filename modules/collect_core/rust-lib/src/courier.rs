@@ -78,7 +78,16 @@ impl LogosDelivery {
         let mut proxy = LogosModuleSDK::new().plugin(DELIVERY_MODULE);
         let inbox: Arc<(Mutex<Inbox>, Condvar)> = Arc::new((Mutex::new(Inbox::default()), Condvar::new()));
 
-        for (name, kind) in [("messageReceived", Event::Received), ("nodeStarted", Event::Started)] {
+        for (name, kind) in [
+            ("messageReceived", Event::Received),
+            ("nodeStarted", Event::Started),
+            // Sends are not awaited (see the module docs), so this is the
+            // only way a refused announcement is ever heard about. Without
+            // it a send that RLN or the relay rejects simply vanishes —
+            // and on a node whose RLN subsystem is Ready but whose
+            // membership is not, every send does exactly that.
+            ("messageError", Event::SendFailed),
+        ] {
             let subscription = proxy
                 .on(name)
                 .map_err(|e| DeliveryError::Unavailable(format!("cannot watch {name}: {e}")))?;
@@ -193,6 +202,7 @@ impl LogosDelivery {
 enum Event {
     Received,
     Started,
+    SendFailed,
 }
 
 /// Record one event.
@@ -229,6 +239,19 @@ fn record(state: &mut Inbox, kind: Event, data: &Value) {
             if overflow > 0 {
                 state.messages.drain(0..overflow);
             }
+        }
+        // messageError(requestId, messageHash, error, timestamp)
+        //
+        // Queued as an inbox item rather than a separate channel, so the
+        // session hears about it through the same drain as everything else.
+        // Shaped so `deliver` cannot mistake it for a message: no topic.
+        Event::SendFailed => {
+            state.messages.push(json!({
+                "kind": "sendFailed",
+                "requestId": at(0).as_str().unwrap_or_default(),
+                "messageHash": at(1).as_str().unwrap_or_default(),
+                "error": at(2).as_str().unwrap_or("the network refused the message"),
+            }));
         }
         // nodeStarted(success, message, timestamp)
         Event::Started => {
@@ -420,6 +443,24 @@ mod tests {
         // The oldest went, not the newest: the newest is the one most likely
         // to still matter.
         assert_eq!(inbox.messages[0]["messageHash"], json!("0x5"));
+    }
+
+    #[test]
+    fn a_refused_send_lands_in_the_inbox_with_its_reason() {
+        // The only way a refused announcement is ever heard about.
+        let mut inbox = Inbox::default();
+        record(
+            &mut inbox,
+            Event::SendFailed,
+            &json!(["req-7", "0xabc", "rln: no usable membership", 1_762_000_000]),
+        );
+        assert_eq!(inbox.messages.len(), 1);
+        let m = &inbox.messages[0];
+        assert_eq!(m["kind"], json!("sendFailed"));
+        assert_eq!(m["requestId"], json!("req-7"));
+        assert_eq!(m["error"], json!("rln: no usable membership"));
+        // Not mistakable for a received message.
+        assert!(m.get("topic").is_none());
     }
 
     #[test]

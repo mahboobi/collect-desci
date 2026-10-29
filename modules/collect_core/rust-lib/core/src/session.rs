@@ -1152,6 +1152,24 @@ impl Session {
         let mut results: Vec<Value> = Vec::new();
         let mut handled = 0usize;
         for message in arrived {
+            // A refused send is not a message to deliver; it is news about
+            // one of ours. Reported through the same results so the UI has
+            // one place to look.
+            if message.get("kind").and_then(Value::as_str) == Some("sendFailed") {
+                let detail = message
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("the network refused the message")
+                    .to_string();
+                eprintln!("collect_core: announcement refused: {detail}");
+                results.push(json!({
+                    "handled": false,
+                    "reason": "send_failed",
+                    "request_id": message.get("requestId").cloned().unwrap_or(Value::Null),
+                    "detail": detail,
+                }));
+                continue;
+            }
             let outcome: Value = match serde_json::from_str(&self.deliver(&message.to_string(), now)) {
                 Ok(v) => v,
                 Err(e) => json!({ "ok": false, "error": { "message": e.to_string() } }),
@@ -3649,6 +3667,23 @@ mod tests {
         // Drained: a second pass has nothing to do, rather than re-handling
         // the batch.
         assert_eq!(data(&s.drain(at("2026-10-25T09:00:30Z")))["received"], json!(0));
+    }
+
+    #[test]
+    fn a_refused_send_is_reported_by_drain_not_swallowed() {
+        let scratch = Scratch::new("sendfailed");
+        let courier = std::sync::Arc::new(crate::delivery::MemoryCourier::new());
+        let mut s = publishing_in(&scratch);
+        s.attach_courier(Box::new(SharedCourier(courier.clone())));
+        courier.arrive_raw(json!({
+            "kind": "sendFailed", "requestId": "req-7", "error": "rln: no usable membership"
+        }));
+        let out = data(&s.drain(at("2026-10-28T09:00:00Z")));
+        assert_eq!(out["received"], json!(1));
+        assert_eq!(out["handled"], json!(0));
+        assert_eq!(out["results"][0]["reason"], json!("send_failed"));
+        assert_eq!(out["results"][0]["request_id"], json!("req-7"));
+        assert!(out["results"][0]["detail"].as_str().unwrap().contains("membership"));
     }
 
     #[test]

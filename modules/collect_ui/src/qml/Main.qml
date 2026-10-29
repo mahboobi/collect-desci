@@ -41,6 +41,8 @@ Item {
     /// Whether the open experiment has a CID yet. The head announcement names
     /// one, so there is nothing to announce until it does.
     property bool openPublished: false
+    property string openCid: ""
+    property var openPublishError: null
 
     // The typed replica for this module's own backend. Null until the view
     // module is ready, so every read is guarded.
@@ -123,6 +125,8 @@ Item {
             });
             Core.heldProtocols = data.protocols ? data.protocols : [];
             app.openPublished = data.published === true;
+            app.openCid = data.cid ? data.cid : "";
+            app.openPublishError = data.publish_error ? data.publish_error : null;
             app.page = "detail";
         });
     }
@@ -315,6 +319,13 @@ Item {
             experiment: Core.experimentDoc
             nowMs: app.nowMs
             mine: app.openMine
+            published: app.openPublished
+            cid: app.openCid
+            publishError: app.openPublishError
+            onPublishNow: {
+                app.call("experiments.publish", { experimentId: app.openExperimentId },
+                         function () { app.openExperiment(app.openExperimentId, true); });
+            }
             onBack: app.page = "home"
             onAddProtocol: {
                 app.editingProtocol = null;
@@ -525,6 +536,11 @@ Item {
                 var r = seen[i];
                 if (r.kind === "receipt" && r.cid === app.lastCid)
                     app.receiptSeen = true;
+                // A send that the network refused is about something the
+                // person did, so it goes to the banner — unlike the rest of
+                // this timer's work.
+                if (r.reason === "send_failed")
+                    Core.reportFailure("An announcement was refused by the network: " + r.detail);
             }
         });
     }

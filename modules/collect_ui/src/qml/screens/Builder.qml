@@ -341,7 +341,11 @@ Flickable {
                                 required property var modelData
                                 width: Theme.touchTarget
                                 height: Theme.touchTarget
-                                anchors.verticalCenter: parent.verticalCenter
+                                // Guarded: a Repeater delegate is created
+                                // before it is parented, and reading
+                                // `parent.verticalCenter` then is the
+                                // TypeError basecamp logged on every field.
+                                anchors.verticalCenter: parent ? parent.verticalCenter : undefined
                                 text: mover.modelData.glyph
                                 Accessible.name: mover.modelData.name + ": " + row.modelData.label
                                 onClicked: screen.moveBy(row.index, mover.modelData.delta)

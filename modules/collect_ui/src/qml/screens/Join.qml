@@ -36,6 +36,15 @@ Flickable {
     // A creator looking at their own experiment is editing, not contributing.
     property bool mine: false
 
+    /// Whether the manifest is on Logos Storage, and where. A creator needs
+    /// to see this: it is the difference between an experiment that exists
+    /// and one that only exists on this machine, and until now the screen
+    /// did not say.
+    property bool published: false
+    property string cid: ""
+    property var publishError: null
+    signal publishNow()
+
     contentWidth: width
     contentHeight: body.implicitHeight + Theme.s48 * 2
     clip: true
@@ -168,6 +177,57 @@ Flickable {
             color: Theme.ink2
             lineHeight: Theme.bodyLineHeight
             lineHeightMode: Text.ProportionalHeight
+        }
+
+        // ---- where it is ----
+        Row {
+            width: parent.width
+            spacing: Theme.s12
+
+            Column {
+                width: parent.width - (retryPublish.visible ? retryPublish.width + Theme.s12 : 0)
+                spacing: Theme.s2
+
+                Text {
+                    width: parent.width
+                    elide: Text.ElideMiddle
+                    text: screen.published
+                          ? "On Logos Storage \u00b7 " + screen.cid
+                          : (screen.publishError
+                             ? "Not published \u00b7 " + screen.publishError.message
+                             : "Not published yet \u2014 saved on this device only")
+                    font.family: screen.published ? Theme.mono : Theme.sans
+                    font.pixelSize: Theme.meta
+                    color: screen.published ? Theme.ink2 : Theme.amber
+                    Accessible.name: screen.published ? "Published at " + screen.cid : "Not published"
+                }
+            }
+
+            Button {
+                id: retryPublish
+                visible: screen.mine && !screen.published
+                anchors.verticalCenter: parent.verticalCenter
+                height: Theme.chipHeight
+                leftPadding: Theme.s14
+                rightPadding: Theme.s14
+                text: "Publish now"
+                Accessible.name: "Publish this experiment to Logos Storage"
+                onClicked: screen.publishNow()
+                contentItem: Text {
+                    text: retryPublish.text
+                    font.family: Theme.sans
+                    font.pixelSize: Theme.small
+                    font.weight: Theme.medium
+                    color: Theme.accent
+                    verticalAlignment: Text.AlignVCenter
+                }
+                background: Rectangle {
+                    radius: Theme.rPill
+                    color: retryPublish.down ? Theme.surfaceSunken : "transparent"
+                    border.width: 1
+                    border.color: Theme.accent
+                }
+            }
         }
 
         PublicNotice {}
