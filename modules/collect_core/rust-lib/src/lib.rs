@@ -182,6 +182,12 @@ struct Collect {
     /// created after the host has stamped the context.
     session: Option<Session>,
 
+    /// When the platform clients were last attempted.
+    ///
+    /// `None` means never. They are attached lazily rather than in
+    /// `on_context_ready`, which is too early — see `platform()`.
+    platform_tried: Option<std::time::Instant>,
+
     /// Where durable state belongs, stamped by the host.
     ///
     /// `None` until `on_context_ready`, which is why nothing opens state before
@@ -192,10 +198,109 @@ struct Collect {
     persistence_path: Option<String>,
 }
 
+/// How long before a failed platform connect is tried again.
+///
+/// Not every call: a connect that fails costs a bounded probe per module, and
+/// paying that on every call would make the whole UI feel broken instead of
+/// just unpublished.
+const PLATFORM_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+
 impl Collect {
-    /// The live session, created on first use.
+    /// The live session, created on first use, with Storage and Delivery
+    /// attached if they can be.
     fn session(&mut self) -> &mut Session {
+        self.platform();
         self.session.get_or_insert_with(Session::new)
+    }
+
+    /// The session without trying to reach another module.
+    ///
+    /// For the paths that cannot need Storage or Delivery, so they do not pay
+    /// the probe.
+    fn local(&mut self) -> &mut Session {
+        self.session.get_or_insert_with(Session::new)
+    }
+
+    /// Attach Storage and Delivery, once, lazily.
+    ///
+    /// **Not in `on_context_ready`**, and this cost a relaunch to find out.
+    /// A module's own auth token is registered with the host *after* that
+    /// callback runs — the log shows `Informing module token for module:
+    /// "collect_core"` two milliseconds after our calls — so a cross-module
+    /// call from there carries a token the provider does not recognise and
+    /// fails `unauthorized`, with the SDK's automatic re-exchange unable to
+    /// help because there is nothing yet to re-exchange against:
+    ///
+    /// ```text
+    /// ModuleProxy: rejecting unauthorized call to "isRunning"
+    ///   - auth token not recognized
+    /// LogosAPIClient: token for "storage_module" rejected by provider;
+    ///   re-exchanging and retrying once
+    /// ```
+    ///
+    /// By the first real call the exchange has happened, so that is where
+    /// this runs. A failure is retried on a later call rather than being
+    /// permanent, because "not loaded yet" is a state that passes.
+    fn platform(&mut self) {
+        let attached = self
+            .session
+            .as_ref()
+            .map(|s| s.can_publish() && s.courier_description().is_some())
+            .unwrap_or(false);
+        if attached {
+            return;
+        }
+        if let Some(last) = self.platform_tried {
+            if last.elapsed() < PLATFORM_RETRY {
+                return;
+            }
+        }
+        self.platform_tried = Some(std::time::Instant::now());
+
+        if self.local().can_publish() {
+            // Storage is already there; only Delivery is missing.
+        } else {
+            let scratch = match &self.persistence_path {
+                Some(path) => std::path::Path::new(path).join("uploads"),
+                // No persistence path means no context yet, so there is
+                // nowhere to stage an upload and nothing to attach to.
+                None => return,
+            };
+            match storage::LogosStorage::connect(&scratch) {
+                Ok(store) => {
+                    eprintln!("collect_core: publishing to {}", store.describe());
+                    self.local().attach_store(Box::new(store));
+                }
+                Err(e) => eprintln!("collect_core: not publishing: {e}"),
+            }
+        }
+
+        // Attached separately, and after: a node that can sign and publish
+        // but not announce is still useful — the documents are on Storage and
+        // a link carries their CIDs — so a Delivery failure must not take
+        // publishing down with it.
+        if self.local().courier_description().is_none() {
+            match courier::LogosDelivery::connect() {
+                Ok(delivery) => {
+                    eprintln!("collect_core: announcing over {}", delivery.describe());
+                    let rln = delivery.rln();
+                    if rln.required && !rln.ready {
+                        // SPEC Q9. Said plainly, because every submitter-side
+                        // announcement will refuse until it is fixed and the
+                        // reason is not discoverable from the UI.
+                        eprintln!(
+                            "collect_core: RLN membership is `{}` ({}) — this node cannot publish announcements yet",
+                            rln.state, rln.message
+                        );
+                    }
+                    self.local().attach_courier(Box::new(delivery));
+                    for topic in self.local().watch_topics() {
+                        eprintln!("collect_core: watching {topic}");
+                    }
+                }
+                Err(e) => eprintln!("collect_core: not announcing: {e}"),
+            }
+        }
     }
 }
 
@@ -222,8 +327,9 @@ impl CollectCoreModule for Collect {
     }
 
     fn identity_me(&mut self) -> String {
-        let key = self.session().creator_key().to_string();
-        let can_sign = self.session().can_sign();
+        // Local: the key is ours and needs no other module.
+        let key = self.local().creator_key().to_string();
+        let can_sign = self.local().can_sign();
         serde_json::json!({
             "ok": true,
             "data": { "key": key, "signing": can_sign }
@@ -398,47 +504,13 @@ impl CollectCoreModule for Collect {
         // First moment a path exists, so this is where the signing key is
         // opened. Without it `create` refuses rather than emitting an
         // unsigned document.
-        match self.session().attach_identity(&ctx.instance_persistence_path) {
+        // Only the signing key here. It is a file in a directory the host
+        // just gave us, so it needs no other module — and nothing that does
+        // can run yet, because this module's own auth token is not registered
+        // until after this callback returns. See `Collect::platform`.
+        match self.local().attach_identity(&ctx.instance_persistence_path) {
             Ok(public) => eprintln!("collect_core: signing as {public}"),
             Err(e) => eprintln!("collect_core: no signing key: {e}"),
-        }
-
-        // Storage is attached the same way, and separately: a node that can
-        // sign but cannot publish still works — documents are kept locally
-        // and the UI says they have no address yet — so a Storage failure
-        // must not take signing down with it.
-        let scratch = std::path::Path::new(&ctx.instance_persistence_path).join("uploads");
-        match storage::LogosStorage::connect(&scratch) {
-            Ok(store) => {
-                eprintln!("collect_core: publishing to {}", store.describe());
-                self.session().attach_store(Box::new(store));
-            }
-            Err(e) => eprintln!("collect_core: not publishing: {e}"),
-        }
-
-        // Delivery, attached separately again and for the same reason: a node
-        // that can sign and publish but not announce is still useful — the
-        // documents are on Storage and a link carries their CIDs — so a
-        // Delivery failure must not take the rest down with it.
-        match courier::LogosDelivery::connect() {
-            Ok(courier) => {
-                eprintln!("collect_core: announcing over {}", courier.describe());
-                let rln = courier.rln();
-                if rln.required && !rln.ready {
-                    // SPEC Q9. Said plainly at startup, because every
-                    // submitter-side announcement will refuse until it is
-                    // fixed and the reason is not discoverable from the UI.
-                    eprintln!(
-                        "collect_core: RLN membership is `{}` ({}) — this node cannot publish announcements yet",
-                        rln.state, rln.message
-                    );
-                }
-                self.session().attach_courier(Box::new(courier));
-                for topic in self.session().watch_topics() {
-                    eprintln!("collect_core: watching {topic}");
-                }
-            }
-            Err(e) => eprintln!("collect_core: not announcing: {e}"),
         }
     }
 }

@@ -60,6 +60,13 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(600);
 /// How long to wait for the node to come up.
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Bound on the first call, which is only asking whether the module is there.
+///
+/// Well under the 20 s protocol default on purpose: this runs on the first UI
+/// call, and when Storage is absent the whole connect has to fail fast enough
+/// not to look like a hang. A present module answers `isRunning` immediately.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// Everything the listener threads collect, under one lock.
 #[derive(Default)]
 struct Events {
@@ -156,9 +163,11 @@ impl LogosStorage {
     /// expected rather than fatal — it means something already configured the
     /// node, and `start` is still the right next step.
     fn ensure_running(&self) -> Result<(), StoreError> {
+        // Bounded, because this is also the probe for "is the module there at
+        // all" and it runs on a UI call.
         if self
             .proxy
-            .call_json("isRunning", &Value::Array(vec![]))
+            .call_json_with_timeout("isRunning", &Value::Array(vec![]), PROBE_TIMEOUT)
             .map_err(|e| StoreError::Unavailable(format!("storage_module not reachable: {e}")))?
             .as_bool()
             .unwrap_or(false)

@@ -56,6 +56,11 @@ is not copied. See `docs/api-verification.md` round 3.
 2. Logos Storage has no network-wide listing and no paid persistence. There is **no pin operation**: keeping a document means its bytes are in local storage, `remove()` is never called, and `advertise` stays on. `manifests()` does list what the local node holds. `remove()` deletes locally only — the DHT record is not withdrawn and other nodes keep what they fetched, so nothing published is ever retractable. The index pages on Storage are the durable list of submissions.
 3. Delivery Store is temporary and its retention is operator-configured. Messages cap out at ~150 KiB — never near mattering, since an announcement only names a CID. Submitters re-announce until they get a receipt; the creator re-publishes `head` every 10 minutes. Contract at `docs/delivery_module.lidl`. Its traps are **not** Storage's: events are typed and **positional**, `payload` is `bstr` (base64, decode with the SDK's `bytes` helper), and inbound messages **must** be deduplicated by `messageHash` because Store catch-up replays a restart's backlog. RLN: `rlnState()` reports it, and the presence of `registryId` is what says RLN applies — an unreadable answer counts as not-ready (SPEC Q9).
 4. Logos Chat addresses change on every launch; do not use Chat for anything here.
+4b. **`on_context_ready` is only for work needing no other module.** A
+   module's own auth token is registered with the host *after* that callback
+   returns, so a cross-module call from there fails `unauthorized` with
+   "token not recognized (re-exchange failed)". Open files there; reach other
+   modules lazily, on the first real call (`Collect::platform`).
 5. `lgs basecamp launch <profile>` wipes the profile, including basecamp's per-module `module_data/`. A module needing state across launches must not keep it there (SPEC.md Q8). For tests that need persistence, hand-launch Basecamp with `--user-dir` pointing outside the scaffold profile tree.
 6. Nix package builds see only git-tracked files: `git add` new files before `nix build .#lgx`. The flake root is the module directory, so nothing above it exists in the build — that is why the contract is copied into the module.
 6b. `rust-lib/Cargo.lock` is committed and must be regenerated against the staged SDK after any dependency change:

@@ -755,3 +755,69 @@ whole of `deliver`, which does Storage fetches and publishes inside it. So the
 courier owns a bounded inbox and the session drains it on a timer
 (`delivery.drain`), which keeps every mutation on one thread and makes the
 whole receive path testable without one.
+
+
+---
+
+## Round 6 — loading and authorization, 29 October 2026
+
+Two failures found by actually running it, each of which looked like the other
+until the log was read closely.
+
+### 1. Installing a module does not load it; the declaration does
+
+`lgpm install` put `storage_module` in the profile and `lgpm list` showed it.
+It was still never loaded, and every call returned:
+
+```
+{"code":"object_unavailable","message":"failed to acquire remote object
+ 'storage_module' (module not loaded, not published, or transport failure)"}
+```
+
+with the subscriptions reported as `DEFERRED, not lost; it will arm when the
+module appears`. **The `dependencies` entry in `metadata.json` is what makes
+the host load a module.** Both are declared now, with flake inputs whose
+transitive `logos-module-builder` `follows` our pin.
+
+Round 4's conclusion — "call it by name instead" — was right about the API and
+wrong about what it bought. The clients still call by name, because that keeps
+`tools/clients-check` able to compile them outside the Nix build. The
+declaration is for the loading.
+
+### 2. `on_context_ready` is too early for a cross-module call
+
+With both modules loading, the calls failed differently:
+
+```
+[storage_module] ModuleProxy: rejecting unauthorized call to "isRunning"
+                 - auth token not recognized
+[collect_core]   LogosAPIClient: token for "storage_module" rejected by
+                 provider; re-exchanging and retrying once
+[collect_core]   not publishing: ... {"code":"unauthorized","message":"call to
+                 'storage_module' rejected: token not recognized
+                 (re-exchange failed)"}
+```
+
+The timestamps are the whole explanation. Those calls are at 12:15:32.811-814.
+`LogosAPIConsumer: Informing module token for module: "collect_core"` is
+**after** them, and `Module loaded: collect_core` is at .814. So a module's own
+auth token is registered with the host *after* `on_context_ready` returns: a
+cross-module call from there presents a token the provider has never seen, and
+the SDK's automatic single re-exchange cannot help because there is nothing yet
+to re-exchange against.
+
+**So `on_context_ready` is only for work that needs no other module.** Collect
+opens its signing key there — a file in a directory the host just handed us —
+and attaches Storage and Delivery lazily on the first real call, by which time
+the exchange has happened (`Collect::platform`). A failed attempt is retried on
+a later call rather than being permanent, since "not loaded yet" is a state
+that passes.
+
+### Fail fast on the probe
+
+Both clients now probe with a 3 s bound (`isRunning`, `getConnectionStatus`)
+instead of the 20 s protocol default, and Delivery **aborts on a failed probe**
+rather than continuing to `createNode` and `start`. The first run through that
+code spent a full minute timing out against a module that had already said it
+could not be reached — visible in the log as a 60-second gap between the
+Storage and Delivery failures.

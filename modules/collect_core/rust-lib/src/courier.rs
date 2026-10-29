@@ -38,6 +38,10 @@ const DELIVERY_MODULE: &str = "delivery_module";
 /// How long to wait for the node to come up.
 const START_TIMEOUT: Duration = Duration::from_secs(90);
 
+/// Bound on the first call, which is only asking whether the module is there.
+/// See `storage.rs` — same reason, same number.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// The network Collect runs on. `logos.test` is the testnet the pinned
 /// basecamp targets, and the one whose RLN membership SPEC Q9 is about.
 const NETWORK: &str = "logos.test";
@@ -110,12 +114,17 @@ impl LogosDelivery {
     /// be a change to what the spec says about privacy, and SPEC 2 forbids
     /// adding that in v1 without asking.
     fn ensure_running(&self) -> Result<(), DeliveryError> {
-        let already = self
+        // Probe first, and **fail on a failed probe** rather than pressing on
+        // to createNode and start. Those are a minute of timeouts against a
+        // module that has already said it cannot be reached, and the first
+        // run through this code spent exactly that.
+        let status = self
             .proxy
-            .call_json("getConnectionStatus", &Value::Array(vec![]))
+            .call_json_with_timeout("getConnectionStatus", &Value::Array(vec![]), PROBE_TIMEOUT)
+            .map_err(|e| DeliveryError::Unavailable(format!("delivery_module not reachable: {e}")))?;
+        let already = result_text(&status)
             .ok()
-            .and_then(|r| result_text(&r).ok())
-            .map(|status| status.contains("onnected") && !status.contains("isconnected"))
+            .map(|s| s.contains("onnected") && !s.contains("isconnected"))
             .unwrap_or(false);
         if already {
             return Ok(());
