@@ -821,3 +821,72 @@ rather than continuing to `createNode` and `start`. The first run through that
 code spent a full minute timing out against a module that had already said it
 could not be reached — visible in the log as a 60-second gap between the
 Storage and Delivery failures.
+
+
+## Q9, answered — 29 October 2026
+
+Not what the question assumed. RLN on `logos.test` did not fail for want of a
+funded membership; it failed because a module was not loaded:
+
+```
+collect_core: RLN membership is `Failed` (rln module start failed:
+  {"class":"transient","kind":"rln_bridge_transport",
+   "message":"start: object_unavailable: failed to acquire remote object
+    'liblogos_rln_module' (module not loaded, not published, or transport
+    failure)"})
+```
+
+`delivery_module` declares `optional_depends [libp2p_module,
+liblogos_rln_module]`, and neither ships with the scaffold-built basecamp — the
+same "installed is not loaded, and not even installed here" gap as Storage.
+Note the classification: upstream calls it **`transient`**, not a
+configuration error.
+
+So the question splits in two, and only the second part is the one SPEC asked:
+
+1. **Is `liblogos_rln_module` present and loaded?** Here, no. It builds from
+   `git+https://github.com/logos-co/logos-rln-modules?dir=logos-rln-module`,
+   which is the input `logos-delivery-module` itself pins.
+2. **Once it is, does the profile have a funded membership?** Still unanswered,
+   and now actually reachable.
+
+Either way the architecture holds: `rlnState()` is read and reported rather
+than assumed, a submitter without a membership gets a non-retryable
+`rln_not_ready` carrying the state, and everything up to the send works because
+a submission is on Storage with a CID before it is announced.
+
+## What worked, finally
+
+```
+collect_core: signing as 3bc384dd…
+collect_core: publishing to Logos Storage via `storage_module`
+collect_core: announcing over Logos Delivery via `delivery_module` on logos.test
+collect_core: watching /collect/1/q7k2m3x4w3b5n6tz/json
+```
+
+The storage node starts on `logos.test` and gets a real signed peer record over
+mix circuit relays. Two more lessons from getting there.
+
+**`storageStart` did not arrive, and waiting for it is wrong.** The module log
+said `NTC Started Storage node id=16U*bpXk36` within a second of the `start()`
+call, while this code waited the full 60 s for the event and timed out — most
+likely because the event fired before the deferred subscription armed, which no
+amount of waiting fixes. `isRunning()` is synchronous and authoritative, so it
+is now the primary signal, polled every 250 ms, with the event kept as a
+shortcut when it does arrive.
+
+**Connecting on the calling thread deadlocked the app.** `collect_ui`'s backend
+calls `session_capabilities()` from its own `onContextReady`, so it inherited
+the connect wait, never signalled ready, and basecamp killed it:
+
+```
+Timeout waiting for ui-host ready signal for "collect_ui"
+logos.viewhost: process did not exit gracefully, killing "collect_ui"
+Failed to load UI module "collect_ui": "Timeout waiting for ui-host"
+```
+
+Starting a storage node and a delivery node takes seconds at best, so it cannot
+happen inside a call a UI is waiting on. The clients are built on a connector
+thread and collected without blocking: the first call reports no publishing,
+and a later one picks them up — the UI's drain timer runs every 15 s, so the
+window is short and self-closing.

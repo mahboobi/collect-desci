@@ -60,6 +60,9 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(600);
 /// How long to wait for the node to come up.
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// How often to ask `isRunning` while waiting for the node to come up.
+const START_POLL: Duration = Duration::from_millis(250);
+
 /// Bound on the first call, which is only asking whether the module is there.
 ///
 /// Well under the 20 s protocol default on purpose: this runs on the first UI
@@ -195,24 +198,43 @@ impl LogosStorage {
             .call_json("start", &Value::Array(vec![]))
             .map_err(|e| StoreError::Unavailable(format!("cannot start the storage node: {e}")))?;
 
+        // Wait by **asking**, not only by listening.
+        //
+        // `storageStart` is the documented completion, and the first run of
+        // this code waited for it for 60 s while the module log said
+        // `NTC Started Storage node` within one second of the call. So the
+        // event did not reach this subscription — plausibly because it fired
+        // before the deferred subscription armed, which is a race no amount
+        // of waiting fixes. `isRunning()` is synchronous and authoritative,
+        // so it is the primary signal and the event is a shortcut when it
+        // does arrive.
         let deadline = Instant::now() + START_TIMEOUT;
-        let mut state = self.lock()?;
         loop {
-            if let Some(result) = state.started.take() {
-                return result.map_err(StoreError::Unavailable);
-            }
-            if state.closed {
-                return Err(StoreError::Unavailable("storage_module stopped".into()));
-            }
-            state = match self.wait(state, deadline)? {
-                Some(next) => next,
-                None => {
-                    return Err(StoreError::Timeout(format!(
-                        "the storage node did not report storageStart in {}s",
-                        START_TIMEOUT.as_secs()
-                    )))
+            {
+                let mut state = self.lock()?;
+                if let Some(result) = state.started.take() {
+                    return result.map_err(StoreError::Unavailable);
                 }
-            };
+                if state.closed {
+                    return Err(StoreError::Unavailable("storage_module stopped".into()));
+                }
+            }
+            if self
+                .proxy
+                .call_json_with_timeout("isRunning", &Value::Array(vec![]), PROBE_TIMEOUT)
+                .ok()
+                .and_then(|r| r.as_bool())
+                .unwrap_or(false)
+            {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(StoreError::Timeout(format!(
+                    "the storage node was not running within {}s, and sent no storageStart",
+                    START_TIMEOUT.as_secs()
+                )));
+            }
+            std::thread::sleep(START_POLL);
         }
     }
 

@@ -182,10 +182,11 @@ struct Collect {
     /// created after the host has stamped the context.
     session: Option<Session>,
 
-    /// When the platform clients were last attempted.
-    ///
-    /// `None` means never. They are attached lazily rather than in
-    /// `on_context_ready`, which is too early — see `platform()`.
+    /// Clients being built on a connector thread. See `platform()`.
+    platform_rx: Option<std::sync::mpsc::Receiver<Built>>,
+
+    /// When the connector thread was last started, so a failed connect is
+    /// retried occasionally rather than never or constantly.
     platform_tried: Option<std::time::Instant>,
 
     /// Where durable state belongs, stamped by the host.
@@ -199,11 +200,16 @@ struct Collect {
 }
 
 /// How long before a failed platform connect is tried again.
-///
-/// Not every call: a connect that fails costs a bounded probe per module, and
-/// paying that on every call would make the whole UI feel broken instead of
-/// just unpublished.
 const PLATFORM_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A finished client, on its way back from the connector thread.
+enum Built {
+    Store(Box<dyn collect_core_logic::store::DocumentStore>),
+    Courier(Box<dyn Courier>),
+    /// A connect that failed, already described. Carried so the main thread
+    /// can log it in order with everything else.
+    Failed(String),
+}
 
 impl Collect {
     /// The live session, created on first use, with Storage and Delivery
@@ -221,15 +227,18 @@ impl Collect {
         self.session.get_or_insert_with(Session::new)
     }
 
-    /// Attach Storage and Delivery, once, lazily.
+    /// Attach Storage and Delivery, lazily and **without ever blocking the
+    /// caller**.
     ///
-    /// **Not in `on_context_ready`**, and this cost a relaunch to find out.
-    /// A module's own auth token is registered with the host *after* that
-    /// callback runs — the log shows `Informing module token for module:
-    /// "collect_core"` two milliseconds after our calls — so a cross-module
-    /// call from there carries a token the provider does not recognise and
-    /// fails `unauthorized`, with the SDK's automatic re-exchange unable to
-    /// help because there is nothing yet to re-exchange against:
+    /// Two things had to be learned the hard way here.
+    ///
+    /// **Not in `on_context_ready`.** A module's own auth token is registered
+    /// with the host *after* that callback returns — the log shows
+    /// `Informing module token for module: "collect_core"` two milliseconds
+    /// after our calls — so a cross-module call from there carries a token the
+    /// provider has never seen and fails `unauthorized`, with the SDK's
+    /// automatic re-exchange unable to help because there is nothing yet to
+    /// re-exchange against:
     ///
     /// ```text
     /// ModuleProxy: rejecting unauthorized call to "isRunning"
@@ -238,16 +247,64 @@ impl Collect {
     ///   re-exchanging and retrying once
     /// ```
     ///
-    /// By the first real call the exchange has happened, so that is where
-    /// this runs. A failure is retried on a later call rather than being
-    /// permanent, because "not loaded yet" is a state that passes.
+    /// **And not on the calling thread either.** Connecting starts a storage
+    /// node and a delivery node, which takes seconds at best. Doing it inline
+    /// deadlocked the app: `collect_ui`'s backend calls
+    /// `session_capabilities()` from its own context-ready handler, so it
+    /// inherited the wait, never signalled ready, and basecamp killed it with
+    /// `Timeout waiting for ui-host ready signal`. The clients are therefore
+    /// built on a connector thread and collected here without blocking — the
+    /// first call reports no publishing, and a later one (the UI's drain timer
+    /// runs every 15 s) picks them up.
+    ///
+    /// A failed connect is retried after `PLATFORM_RETRY`, because "not
+    /// loaded yet" is a state that passes.
     fn platform(&mut self) {
-        let attached = self
-            .session
-            .as_ref()
-            .map(|s| s.can_publish() && s.courier_description().is_some())
-            .unwrap_or(false);
-        if attached {
+        // 1. Collect whatever the connector thread has finished. Drained into
+        //    a Vec first because attaching needs `&mut self.session` while
+        //    the receiver is borrowed from `self`.
+        let mut finished: Vec<Built> = Vec::new();
+        let mut done = false;
+        if let Some(rx) = &self.platform_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(built) => finished.push(built),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        done = true;
+                        break;
+                    }
+                }
+            }
+        }
+        for built in finished {
+            match built {
+                Built::Store(store) => {
+                    eprintln!("collect_core: publishing to {}", store.describe());
+                    self.local().attach_store(store);
+                }
+                Built::Courier(courier) => {
+                    eprintln!("collect_core: announcing over {}", courier.describe());
+                    self.local().attach_courier(courier);
+                    for topic in self.local().watch_topics() {
+                        eprintln!("collect_core: watching {topic}");
+                    }
+                }
+                Built::Failed(message) => eprintln!("collect_core: {message}"),
+            }
+        }
+        if done {
+            self.platform_rx = None;
+        }
+
+        // 2. Start a connector if nothing is in flight and something is still
+        //    missing.
+        if self.platform_rx.is_some() {
+            return;
+        }
+        let want_store = !self.local().can_publish();
+        let want_courier = self.local().courier_description().is_none();
+        if !want_store && !want_courier {
             return;
         }
         if let Some(last) = self.platform_tried {
@@ -255,51 +312,56 @@ impl Collect {
                 return;
             }
         }
+        // No persistence path means no context yet, so there is nowhere to
+        // stage an upload and nothing to attach to.
+        let Some(path) = self.persistence_path.clone() else {
+            return;
+        };
         self.platform_tried = Some(std::time::Instant::now());
 
-        if self.local().can_publish() {
-            // Storage is already there; only Delivery is missing.
-        } else {
-            let scratch = match &self.persistence_path {
-                Some(path) => std::path::Path::new(path).join("uploads"),
-                // No persistence path means no context yet, so there is
-                // nowhere to stage an upload and nothing to attach to.
-                None => return,
-            };
-            match storage::LogosStorage::connect(&scratch) {
-                Ok(store) => {
-                    eprintln!("collect_core: publishing to {}", store.describe());
-                    self.local().attach_store(Box::new(store));
-                }
-                Err(e) => eprintln!("collect_core: not publishing: {e}"),
-            }
-        }
-
-        // Attached separately, and after: a node that can sign and publish
-        // but not announce is still useful — the documents are on Storage and
-        // a link carries their CIDs — so a Delivery failure must not take
-        // publishing down with it.
-        if self.local().courier_description().is_none() {
-            match courier::LogosDelivery::connect() {
-                Ok(delivery) => {
-                    eprintln!("collect_core: announcing over {}", delivery.describe());
-                    let rln = delivery.rln();
-                    if rln.required && !rln.ready {
-                        // SPEC Q9. Said plainly, because every submitter-side
-                        // announcement will refuse until it is fixed and the
-                        // reason is not discoverable from the UI.
-                        eprintln!(
-                            "collect_core: RLN membership is `{}` ({}) — this node cannot publish announcements yet",
-                            rln.state, rln.message
-                        );
-                    }
-                    self.local().attach_courier(Box::new(delivery));
-                    for topic in self.local().watch_topics() {
-                        eprintln!("collect_core: watching {topic}");
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.platform_rx = Some(rx);
+        let spawned = std::thread::Builder::new()
+            .name("collect-platform-connect".into())
+            .spawn(move || {
+                if want_store {
+                    let scratch = std::path::Path::new(&path).join("uploads");
+                    let built = match storage::LogosStorage::connect(&scratch) {
+                        Ok(store) => Built::Store(Box::new(store)),
+                        Err(e) => Built::Failed(format!("not publishing: {e}")),
+                    };
+                    if tx.send(built).is_err() {
+                        return;
                     }
                 }
-                Err(e) => eprintln!("collect_core: not announcing: {e}"),
-            }
+                // Separately, and after: a node that can sign and publish but
+                // not announce is still useful — the documents are on Storage
+                // and a link carries their CIDs — so a Delivery failure must
+                // not take publishing down with it.
+                if want_courier {
+                    let built = match courier::LogosDelivery::connect() {
+                        Ok(delivery) => {
+                            let rln = delivery.rln();
+                            if rln.required && !rln.ready {
+                                // SPEC Q9. Said plainly, because every
+                                // submitter-side announcement refuses until
+                                // it is fixed and the reason is not
+                                // discoverable from the UI.
+                                eprintln!(
+                                    "collect_core: RLN membership is `{}` ({}) — this node cannot publish announcements yet",
+                                    rln.state, rln.message
+                                );
+                            }
+                            Built::Courier(Box::new(delivery))
+                        }
+                        Err(e) => Built::Failed(format!("not announcing: {e}")),
+                    };
+                    let _ = tx.send(built);
+                }
+            });
+        if let Err(e) = spawned {
+            eprintln!("collect_core: cannot start the platform connector: {e}");
+            self.platform_rx = None;
         }
     }
 }
