@@ -64,7 +64,9 @@ Column {
         width: panel.width
         label: "Required"
         on: panel.field ? panel.field.required === true : false
-        onOnChanged: panel.setMember("required", on)
+        // `toggled`, not `onChanged`: `on` is bound to the field, so writing
+        // back on every change of it loops.
+        onToggled: function (value) { panel.setMember("required", value); }
     }
 
     // ---- text and longtext ----
@@ -125,7 +127,7 @@ Column {
         width: panel.width
         label: "Whole numbers only"
         on: panel.config.integer === true
-        onOnChanged: panel.setConfig("integer", on)
+        onToggled: function (value) { panel.setConfig("integer", value); }
     }
 
     // ---- choice and multi ----
@@ -202,7 +204,7 @@ Column {
         width: panel.width
         label: "Cannot be in the future"
         on: panel.config.no_future === true
-        onOnChanged: panel.setConfig("no_future", on)
+        onToggled: function (value) { panel.setConfig("no_future", value); }
     }
 
     // ---- photo ----
@@ -260,7 +262,7 @@ Column {
             label: "Round to about 1 km"
             hint: "Strongly recommended. Everything is public and nothing on Logos Storage can be deleted, so an exact position saved once is public forever."
             on: panel.config.store === "rounded_1km"
-            onOnChanged: panel.setConfig("store", on ? "rounded_1km" : "exact")
+            onToggled: function (value) { panel.setConfig("store", value ? "rounded_1km" : "exact"); }
         }
 
         Text {

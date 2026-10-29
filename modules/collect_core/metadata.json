@@ -9,7 +9,8 @@
   "main": "collect_core_plugin",
   "dependencies": [
     "storage_module",
-    "delivery_module"
+    "delivery_module",
+    "liblogos_rln_module"
   ],
   "codegen": {
     "rust": {

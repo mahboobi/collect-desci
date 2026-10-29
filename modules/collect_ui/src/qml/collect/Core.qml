@@ -78,6 +78,14 @@ QtObject {
     /// same way as a success, so the caller must not assume.
     function parseEnvelope(text, what) {
         var envelope;
+        // An empty reply is not malformed JSON, it is no reply: a call made
+        // before the backend is initialized resolves to nothing. Saying so
+        // beats "SyntaxError: Parse error", which sends the reader looking
+        // for a bug in the module.
+        if (text === undefined || text === null || String(text) === "") {
+            core.reportFailure(what + ": collect_core did not reply");
+            return null;
+        }
         try {
             envelope = JSON.parse(text);
         } catch (e) {

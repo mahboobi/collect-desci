@@ -43,6 +43,16 @@ Item {
     // module is ready, so every read is guarded.
     readonly property var backend: logos.module("collect_ui") // qmllint disable unqualified
 
+    /// Whether a call will actually reach collect_core.
+    ///
+    /// The replica object exists before the remote behind it is initialized,
+    /// so `backend !== null` is not enough: a call made in that window
+    /// resolves to nothing, and `JSON.parse` of nothing is
+    /// `SyntaxError: Parse error` — which is what the drain timer produced
+    /// when it was gated on the replica alone. `coreReady` is the `.rep` PROP
+    /// the backend sets once it has talked to collect_core.
+    readonly property bool ready: app.backend !== null && app.backend.coreReady === true
+
     anchors.fill: parent
 
     Rectangle {
@@ -75,7 +85,7 @@ Item {
     /// Treating the return as a string is the bug that made every call fail
     /// silently.
     function call(method, request, onData) {
-        if (!app.backend) {
+        if (!app.ready) {
             Core.reportFailure("collect_core is not reachable yet");
             return;
         }
@@ -105,7 +115,7 @@ Item {
 
     /// Like call(), but the request is already a JSON string.
     function callRaw(method, requestJson, onData, onFail) {
-        if (!app.backend) {
+        if (!app.ready) {
             Core.reportFailure("collect_core is not reachable yet");
             if (onFail)
                 onFail();
@@ -168,7 +178,7 @@ Item {
 
     Text {
         anchors.centerIn: parent
-        visible: !app.backend
+        visible: !app.ready
         text: "Connecting to collect_core\u2026"
         font.family: Theme.sans
         font.pixelSize: Theme.body
@@ -448,7 +458,8 @@ Item {
     // screen. 15 seconds: often enough that a submitter does not wait long
     // for a receipt, rare enough to cost nothing when nothing is arriving.
     Timer {
-        running: app.backend !== null
+        // `ready`, not `backend !== null`: see the property's note.
+        running: app.ready
         interval: 15000
         repeat: true
         triggeredOnStart: true
@@ -459,8 +470,9 @@ Item {
                 if (app.page === "results" && app.resultsProtocolId !== "")
                     app.openResults(app.resultsProtocolId, false);
             }
-            for (var i = 0; i < data.results.length; i++) {
-                var r = data.results[i];
+            var seen = data.results ? data.results : [];
+            for (var i = 0; i < seen.length; i++) {
+                var r = seen[i];
                 if (r.kind === "receipt" && r.cid === app.lastCid)
                     app.receiptSeen = true;
             }
@@ -471,7 +483,7 @@ Item {
     // Delivery's Store is temporary and a submitter who joins later has no
     // other way to find the newest index.
     Timer {
-        running: app.backend !== null && app.openMine && app.openExperimentId !== ""
+        running: app.ready && app.openMine && app.openExperimentId !== ""
         interval: 600000
         repeat: true
         triggeredOnStart: true

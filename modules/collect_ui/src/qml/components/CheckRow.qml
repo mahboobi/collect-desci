@@ -1,4 +1,10 @@
 // A labelled checkbox with optional explanatory text.
+//
+// `toggled` fires only when a person clicks it, which is what a caller that
+// *binds* `on` must listen to. Watching `onChanged` instead is a binding
+// loop: the write-back changes the bound expression, which re-evaluates `on`,
+// which fires `onChanged` again. Builder's "Required" row did exactly that —
+// `QML FieldSettings: Binding loop detected for property "field"`.
 import QtQuick
 import QtQuick.Controls
 import collect
@@ -9,6 +15,9 @@ Item {
     required property string label
     property string hint: ""
     property bool on: false
+
+    /// Emitted only for a click, never for a binding re-evaluation.
+    signal toggled(bool on)
 
     implicitHeight: layout.implicitHeight
 
@@ -26,7 +35,10 @@ Item {
             Accessible.name: row.label
             Accessible.checkable: true
             Accessible.checked: row.on
-            onClicked: row.on = !row.on
+            onClicked: {
+                row.on = !row.on;
+                row.toggled(row.on);
+            }
 
             contentItem: Rectangle {
                 anchors.centerIn: parent

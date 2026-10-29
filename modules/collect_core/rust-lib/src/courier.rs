@@ -42,6 +42,9 @@ const START_TIMEOUT: Duration = Duration::from_secs(90);
 /// See `storage.rs` — same reason, same number.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// How often to ask whether the node exists yet, while waiting.
+const START_POLL: Duration = Duration::from_millis(500);
+
 /// The network Collect runs on. `logos.test` is the testnet the pinned
 /// basecamp targets, and the one whose RLN membership SPEC Q9 is about.
 const NETWORK: &str = "logos.test";
@@ -138,35 +141,49 @@ impl LogosDelivery {
             .call_json("start", &Value::Array(vec![]))
             .map_err(|e| DeliveryError::Unavailable(format!("cannot start the delivery node: {e}")))?;
 
+        // Wait by **asking**, like `storage.rs`, and for the same reason:
+        // `nodeStarted` did not arrive. The first run waited the full 90 s
+        // for it, failed, and then succeeded on the retry — so the node was
+        // up all along and the event had simply been missed, most likely
+        // fired before the deferred subscription armed.
+        //
+        // What is waited for is the node *existing*, not the node being
+        // connected to peers. Until `createNode` has run, the module answers
+        // `getConnectionStatus` with an error ("context not initialized");
+        // once it answers at all, there is a node. Peer connectivity is a
+        // separate, reported concern — announcements can be made before the
+        // mesh settles, and refusing to attach until it has would leave the
+        // UI saying Delivery is missing when it is merely young.
         let deadline = Instant::now() + START_TIMEOUT;
-        let (lock, waiters) = &*self.inbox;
-        let mut state = lock
-            .lock()
-            .map_err(|_| DeliveryError::Rejected("a delivery listener panicked".into()))?;
         loop {
-            if let Some(result) = state.started.take() {
-                return result.map_err(DeliveryError::Unavailable);
+            {
+                let (lock, _) = &*self.inbox;
+                let mut state = lock
+                    .lock()
+                    .map_err(|_| DeliveryError::Rejected("a delivery listener panicked".into()))?;
+                if let Some(result) = state.started.take() {
+                    return result.map_err(DeliveryError::Unavailable);
+                }
+                if state.closed {
+                    return Err(DeliveryError::Unavailable("delivery_module stopped".into()));
+                }
             }
-            if state.closed {
-                return Err(DeliveryError::Unavailable("delivery_module stopped".into()));
+            let exists = self
+                .proxy
+                .call_json_with_timeout("getConnectionStatus", &Value::Array(vec![]), PROBE_TIMEOUT)
+                .ok()
+                .map(|answer| result_value(&answer).is_ok())
+                .unwrap_or(false);
+            if exists {
+                return Ok(());
             }
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
+            if Instant::now() >= deadline {
                 return Err(DeliveryError::Timeout(format!(
-                    "the delivery node did not report nodeStarted in {}s",
+                    "the delivery node was not up within {}s, and sent no nodeStarted",
                     START_TIMEOUT.as_secs()
                 )));
             }
-            let (next, timed_out) = waiters
-                .wait_timeout(state, left)
-                .map_err(|_| DeliveryError::Rejected("a delivery listener panicked".into()))?;
-            state = next;
-            if timed_out.timed_out() && Instant::now() >= deadline {
-                return Err(DeliveryError::Timeout(format!(
-                    "the delivery node did not report nodeStarted in {}s",
-                    START_TIMEOUT.as_secs()
-                )));
-            }
+            std::thread::sleep(START_POLL);
         }
     }
 }
