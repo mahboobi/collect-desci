@@ -46,12 +46,18 @@ const STORAGE_MODULE: &str = "storage_module";
 /// Storage's chunk size, the contract's documented default.
 const CHUNK_SIZE: i64 = 65536;
 
-/// How long a single upload may take to complete.
+/// How long a single upload may wait before it is reported as a timeout.
 ///
-/// Not the protocol default (20 s), which only covers Storage *accepting* the
-/// job — this bounds the completion event. A document that has not landed in
-/// two minutes is reported as a retryable timeout rather than hanging the UI.
-const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+/// **Under** the 20 s protocol default, deliberately. This runs inside a call
+/// the UI is waiting on, so if it outlasts that default the UI gets no reply
+/// at all — which is what "experiments.create: collect_core did not reply"
+/// was. Failing first means the caller gets a real answer: a retryable
+/// `storage_timeout`, with the document kept and `experiments.publish` able
+/// to try again.
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(12);
+
+/// How often to look for the upload in `manifests()` while waiting.
+const UPLOAD_POLL: Duration = Duration::from_millis(200);
 
 /// How long a fetch may take. Longer than an upload on purpose: a cold fetch
 /// crosses the DHT, and SPEC 3.3 asks for patience there.
@@ -266,36 +272,66 @@ impl LogosStorage {
         Ok(Some(next))
     }
 
-    /// Wait for `session`'s upload to complete and give up its CID.
-    fn claim_upload(&self, session: Option<&str>) -> Result<String, StoreError> {
+    /// Wait for an upload to complete and give up its CID.
+    ///
+    /// Two signals, because the event alone is not reliable: `storageStart`
+    /// never reached this process either, and the same deferred-subscription
+    /// race applies to `storageUploadDone`. So the authoritative check is
+    /// `manifests()`, which lists what this node holds along with each
+    /// entry's `filename` — and the staged filename is ours, so the upload
+    /// can be recognised there without knowing its CID in advance.
+    fn claim_upload(&self, session: Option<&str>, filename: &str) -> Result<String, StoreError> {
         let deadline = Instant::now() + UPLOAD_TIMEOUT;
-        let mut state = self.lock()?;
         loop {
-            if let Some(id) = session {
-                if let Some(result) = state.uploads.remove(id) {
+            {
+                let mut state = self.lock()?;
+                if let Some(id) = session {
+                    if let Some(result) = state.uploads.remove(id) {
+                        return result.map_err(StoreError::Rejected);
+                    }
+                }
+                // Otherwise the completion that arrived while we held the
+                // transfer lock. Sound only because transfers are serialised.
+                if let Some(result) = state.orphan_upload.take() {
                     return result.map_err(StoreError::Rejected);
                 }
-            }
-            // Otherwise the completion that arrived while we held the transfer
-            // lock. Sound only because transfers are serialised.
-            if let Some(result) = state.orphan_upload.take() {
-                return result.map_err(StoreError::Rejected);
-            }
-            if state.closed {
-                return Err(StoreError::Unavailable(
-                    "storage_module stopped before the upload completed".into(),
-                ));
-            }
-            state = match self.wait(state, deadline)? {
-                Some(next) => next,
-                None => {
-                    return Err(StoreError::Timeout(format!(
-                        "no storageUploadDone in {}s",
-                        UPLOAD_TIMEOUT.as_secs()
-                    )))
+                if state.closed {
+                    return Err(StoreError::Unavailable(
+                        "storage_module stopped before the upload completed".into(),
+                    ));
                 }
-            };
+            }
+            if let Some(cid) = self.cid_in_manifests(filename) {
+                return Ok(cid);
+            }
+            if Instant::now() >= deadline {
+                return Err(StoreError::Timeout(format!(
+                    "the upload was not in manifests() within {}s, and sent no storageUploadDone",
+                    UPLOAD_TIMEOUT.as_secs()
+                )));
+            }
+            std::thread::sleep(UPLOAD_POLL);
         }
+    }
+
+    /// The CID this node holds under `filename`, if any.
+    fn cid_in_manifests(&self, filename: &str) -> Option<String> {
+        let answer = self
+            .proxy
+            .call_json_with_timeout("manifests", &Value::Array(vec![]), PROBE_TIMEOUT)
+            .ok()?;
+        let listed = result_value(&answer).ok()?;
+        // The value may arrive as a JSON array or as text holding one.
+        let items = match &listed {
+            Value::String(text) => serde_json::from_str::<Value>(text).ok()?,
+            other => other.clone(),
+        };
+        items
+            .as_array()?
+            .iter()
+            .find(|m| m.get("filename").and_then(Value::as_str) == Some(filename))
+            .and_then(|m| m.get("cid").and_then(Value::as_str))
+            .map(str::to_string)
     }
 
     /// Wait for `session`'s download to finish writing its file.
@@ -476,7 +512,10 @@ impl DocumentStore for LogosStorage {
             return Err(StoreError::Rejected(format!("uploadUrl refused: {message}")));
         }
 
-        let outcome = self.claim_upload(session_id_of(&accepted).as_deref());
+        let outcome = self.claim_upload(
+            session_id_of(&accepted).as_deref(),
+            &path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+        );
         drop(staged);
         outcome
     }

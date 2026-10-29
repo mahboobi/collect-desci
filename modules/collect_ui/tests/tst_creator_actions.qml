@@ -146,6 +146,28 @@ Item {
             screen.destroy();
         }
 
+        function test_both_modes_offer_a_way_back_at_the_top() {
+            // Cancel sits at the bottom of a long form, which is no use to
+            // someone who has scrolled and changed their mind.
+            var fresh = detailsComponent.createObject(host, {});
+            var back = host.buttonSaying(fresh, "\u2190 All experiments");
+            verify(back !== null, "a new experiment can be left");
+            var left = 0;
+            fresh.cancelled.connect(function () { left++; });
+            back.clicked();
+            compare(left, 1);
+            fresh.destroy();
+
+            // Editing came from the experiment, so it goes back there.
+            var editing = detailsComponent.createObject(host, {
+                existing: { id: "q7k2m3x4w3b5n6tz", title: "x", description: "",
+                            starts_at: "2026-10-20T00:00:00Z", ends_at: "2026-11-20T00:00:00Z",
+                            timezone: "UTC", creator: { key: "a1", name: "" } }
+            });
+            verify(host.buttonSaying(editing, "\u2190 Back to the experiment") !== null);
+            editing.destroy();
+        }
+
         function test_a_new_experiment_screen_starts_empty() {
             var screen = detailsComponent.createObject(host, {});
             compare(screen.editing, false);

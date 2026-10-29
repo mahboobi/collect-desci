@@ -76,6 +76,30 @@ Flickable {
         width: Math.min(screen.width - Theme.s32 * 2, 720)
         spacing: Theme.s24
 
+        // The same back control the other screens have. Cancel sits at the
+        // bottom of a long form, which is no use to someone who has scrolled
+        // and changed their mind.
+        Button {
+            id: backButton
+            height: Theme.chipHeight
+            leftPadding: Theme.s12
+            rightPadding: Theme.s14
+            text: screen.editing ? "\u2190 Back to the experiment" : "\u2190 All experiments"
+            Accessible.name: screen.editing ? "Back to the experiment" : "Back to all experiments"
+            onClicked: screen.cancelled()
+            contentItem: Text {
+                text: backButton.text
+                font.family: Theme.sans
+                font.pixelSize: Theme.small
+                color: Theme.ink2
+                verticalAlignment: Text.AlignVCenter
+            }
+            background: Rectangle {
+                radius: Theme.rPill
+                color: backButton.down ? Theme.surfaceSunken : "transparent"
+            }
+        }
+
         Text {
             text: screen.editing ? "Edit experiment" : "New experiment"
             font.family: Theme.sans
