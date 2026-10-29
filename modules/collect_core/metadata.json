@@ -7,7 +7,10 @@
   "category": "science",
   "description": "Documents, signing, validation, media and indexing for Collect.",
   "main": "collect_core_plugin",
-  "dependencies": [],
+  "dependencies": [
+    "storage_module",
+    "delivery_module"
+  ],
   "codegen": {
     "rust": {
       "crate": "rust-lib",

@@ -641,12 +641,32 @@ all, drop the declaration and call it by name through modules().dynamic("<name>"
 ```
 
 So a declared dependency needs a flake input publishing
-`packages.<system>.lidl`. `logos-storage-module` does publish one, so the typed
-route is available — but it pins the whole module into our flake and the typed
-client only exists inside a Nix build, which costs the fast local compile check
-that caught all three mistakes above. We call by name instead, through
-`LogosModuleSDK::new().plugin("storage_module")` — the same thing a generated
-client's `::new()` does — and read the contract out of band, as here.
+`packages.<system>.lidl`. Both `logos-storage-module` and
+`logos-delivery-module` publish one.
+
+**Calling by name instead is not an option, and this cost a relaunch to
+learn.** Dropping the declaration builds fine and the by-name proxy is the
+right API — but *nothing then loads the dependency*. With `storage_module`
+installed in the profile and `collect_core` running, every call came back:
+
+```
+collect_core: not publishing: Logos Storage is not available:
+  storage_module not reachable: Method call storage_module.isRunning() failed:
+  {"code":"object_unavailable","message":"failed to acquire remote object
+   'storage_module' (module not loaded, not published, or transport failure)"}
+```
+
+with the event subscriptions reported as `DEFERRED, not lost; it will arm when
+the module appears`. Installing a module does not load it; **the declaration in
+`metadata.json` is what makes the host load it.** So both are declared, with
+their transitive `logos-module-builder` unified onto our pin via `follows` —
+the same trap `collect_ui` has for `collect_core`.
+
+The hand-written clients still call by name through
+`LogosModuleSDK::new().plugin("…")` — the same thing a generated client's
+`::new()` does — because that keeps `tools/clients-check` able to compile them
+outside the Nix build, which is what caught all three mistakes above. The
+declaration is there for the loading, not for the typed client.
 
 ### The dev Basecamp has no storage_module
 

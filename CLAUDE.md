@@ -42,9 +42,13 @@ is not copied. See `docs/api-verification.md` round 3.
 ## Platform constraints
 
 1. QML UI modules are sandboxed: no network, no files outside the module. All Storage, Delivery, file and crypto work happens in `collect_core`; the UI calls it with `logos.callModule`.
-1b. Storage is reached by name, not as a declared dependency: naming it in
-   `metadata.json` fails the build because it publishes no LIDL contract our
-   flake pins. The contract is committed at `docs/storage_module.lidl` — read
+1b. Storage and Delivery must be **declared** in `metadata.json` *and* given
+   flake inputs with `follows` unification. Installing a module does not load
+   it — the declaration is what makes the host load it, and without one every
+   call returns `object_unavailable` with subscriptions stuck `DEFERRED`. The
+   clients still call by name (`LogosModuleSDK::new().plugin(…)`) so
+   `tools/clients-check` can compile them outside Nix; the declaration is for
+   the loading, not the typed client. The contract is committed at `docs/storage_module.lidl` — read
    it, not the rendered reference. Three traps it corrects: every event payload
    is a JSON **string** (`payload: tstr`), so it must be parsed and not
    indexed; `downloadToUrl` is **async** and its completion event carries no
