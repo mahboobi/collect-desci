@@ -890,3 +890,48 @@ happen inside a call a UI is waiting on. The clients are built on a connector
 thread and collected without blocking: the first call reports no publishing,
 and a later one picks them up — the UI's drain timer runs every 15 s, so the
 window is short and self-closing.
+
+
+## The RLN dependency chain — 29 October 2026
+
+Announcements on `logos.test` need RLN, and RLN is three modules deep:
+
+```
+delivery_module
+  -> liblogos_rln_module        (optional_depends; the bridge delivery calls)
+       -> liblogos_lez_rln_module   (its own dependency; the backend)
+```
+
+Both of the last two live in `github.com/logos-co/logos-rln-modules`, under
+`dir=logos-rln-module` and `dir=logos-lez-rln-module`, at the revisions
+`logos-delivery-module` pins. Neither ships with the scaffold-built basecamp.
+
+**Installing only the middle one is useless, and silently so.** It sits in the
+profile, `lgpm list` shows it, and it never loads — because *its* dependency is
+missing and the load fails without a message. Delivery then reports:
+
+```
+rln Failed: {"class":"transient","kind":"rln_bridge_transport",
+ "message":"start: object_unavailable: failed to acquire remote object
+  'liblogos_rln_module' (module not loaded, not published, or transport
+  failure)"}
+```
+
+**Declaring it to force the load makes things worse.** Adding
+`liblogos_rln_module` to `collect_core`'s `dependencies` makes basecamp walk the
+chain, find the end of it missing, and refuse to load **Collect** at all:
+
+> 'Collect' cannot be loaded because the following modules are not installed:
+> · liblogos_lez_rln_module
+
+Which is the right behaviour and a useful error — it names the real missing
+piece — but it costs the whole app, so it is not a workaround to leave in. A
+module Collect never calls should not be able to stop Collect opening.
+
+The fix is to install the backend, not to declare the bridge. `libp2p_module`
+is the precedent: also an `optional_depends` of delivery, and it loads by
+itself once it is present in the profile.
+
+Note the classification throughout: upstream calls these **transient**, not
+configuration errors — consistent with "a module that has not appeared yet",
+which is exactly what they are.

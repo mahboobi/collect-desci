@@ -72,6 +72,12 @@ is not copied. See `docs/api-verification.md` round 3.
     `nix build github:logos-co/logos-module-builder/0.3.0#rust-sdk-src -o logos-rust-sdk-src && (cd rust-lib && cargo generate-lockfile)`
 7. Each sub-flake must expose `packages.<system>.lgx`, and every transitive `logos-module-builder` input must `follows` the top-level pin — otherwise `flake.lock` carries two and the stale one wins under scaffold's `--override-input`. Sibling inputs must use the single-line `path:../<sibling>` form; the scaffold parser is line-level.
 8. A `ui_qml` package must ship a 256x256 PNG icon at `assets/icon.png`, and `main` / `view` in `metadata.json` must name files that exist in the built variant. Validation rejects both.
+8b. Announcements need RLN, which is three modules deep: `delivery_module` ->
+   `liblogos_rln_module` -> `liblogos_lez_rln_module`, the last two from
+   `logos-rln-modules` and neither shipped with basecamp. Install the backend;
+   do **not** declare the bridge as a Collect dependency — basecamp then walks
+   the chain and refuses to load Collect itself. A module Collect never calls
+   must not be able to stop Collect opening.
 9. On macOS the module socket path is capped at 104 bytes, so keep `runtime_dir` short (`/tmp/lgs-<profile>` is the scaffold default).
 
 ## Rules
