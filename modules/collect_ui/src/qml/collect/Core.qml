@@ -186,16 +186,29 @@ QtObject {
     signal submitted(string cid)
     signal receiptReceived(string cid)
 
+    /// Where a filled-in form goes.
+    ///
+    /// This used to mint a random `logos:zb2rhFixture…` and call it done,
+    /// which is why submitting appeared to work and nothing was ever stored.
+    /// `submitter` is set by the caller: the UI has no route to collect_core
+    /// of its own, so Main injects one.
+    property var submitter: null
+
     function submit(draft, onDone) {
-        if (!fixtures) {
-            onDone({ ok: false, error: { code: "not_wired", message: "live submit is not wired yet" } });
+        if (!core.submitter) {
+            onDone({ ok: false, error: { code: "not_wired", message: "collect_core is not reachable yet" } });
             return;
         }
-        var cid = "logos:zb2rhFixture" + Math.floor(Math.random() * 1e6);
-        core.submitted(cid);
-        receiptTimer.cid = cid;
-        receiptTimer.restart();
-        onDone({ ok: true, data: { cid: cid } });
+        core.submitter(draft, function (data) { // qmllint disable use-proper-function
+            if (data.submitted !== true) {
+                onDone({ ok: false, error: { code: "invalid_values",
+                                             message: "Some answers still need fixing." },
+                         data: data });
+                return;
+            }
+            core.submitted(data.cid);
+            onDone({ ok: true, data: data });
+        });
     }
 
     property Timer receiptTimer: Timer {

@@ -21,6 +21,8 @@ Flickable {
 
     signal openProtocol(string protocolId)
     signal editProtocol(string protocolId)
+    /// The creator filling in their own form, rather than editing it.
+    signal fillInProtocol(string protocolId)
     signal openResults(string protocolId)
     signal addProtocol()
     signal editExperiment()
@@ -289,7 +291,9 @@ Flickable {
                         Column {
                             anchors.verticalCenter: parent.verticalCenter
                             width: parent.width - fillButton.width
-                                   - (screen.mine ? resultsButton.width + Theme.s12 : 0) - Theme.s24
+                                   - (screen.mine ? resultsButton.width + Theme.s12 : 0)
+                                   - (submitAsCreator.visible ? submitAsCreator.width + Theme.s12 : 0)
+                                   - Theme.s24
                             spacing: Theme.s4
 
                             Text {
@@ -332,6 +336,39 @@ Flickable {
                             background: Rectangle {
                                 radius: Theme.rControl
                                 color: resultsButton.down ? Theme.accentTint : "transparent"
+                                border.width: 1
+                                border.color: Theme.accent
+                            }
+                        }
+
+                        Button {
+                            // The creator's own "Fill in". A creator
+                            // submitting to their own experiment is an
+                            // ordinary submitter — same form, same
+                            // validation, same signature — and without this
+                            // there is no way to try a form you just built.
+                            id: submitAsCreator
+                            visible: screen.mine && card.fillable
+                            anchors.verticalCenter: parent.verticalCenter
+                            height: Theme.touchTarget
+                            leftPadding: Theme.s16
+                            rightPadding: Theme.s16
+                            text: "Fill in"
+                            Accessible.name: (card.doc ? card.doc.name : card.modelData.id)
+                                             + ": fill this form in yourself"
+                            onClicked: screen.fillInProtocol(card.modelData.id)
+                            contentItem: Text {
+                                text: submitAsCreator.text
+                                font.family: Theme.sans
+                                font.pixelSize: Theme.small
+                                font.weight: Theme.medium
+                                color: Theme.accent
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            background: Rectangle {
+                                radius: Theme.rControl
+                                color: submitAsCreator.down ? Theme.surfaceSunken : "transparent"
                                 border.width: 1
                                 border.color: Theme.accent
                             }

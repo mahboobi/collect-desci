@@ -238,8 +238,13 @@ Flickable {
             values: renderer.values()
         };
         Core.submit(draft, function (result) {
-            if (result.ok)
+            if (result.ok) {
                 screen.submitted(result.data.cid);
+                return;
+            }
+            // A refused submission has to say so. Returning quietly here is
+            // how "I pressed Submit and nothing happened" gets built.
+            Core.reportFailure(result.error ? result.error.message : "The submission was refused.");
         });
     }
 }

@@ -73,7 +73,17 @@ Item {
         }
     }
 
-    Component.onCompleted: app.ingestList()
+    Component.onCompleted: {
+        // Core has no route to collect_core of its own, so give it one.
+        Core.submitter = function (draft, onData) {
+            app.call("submissions.submit", {
+                experimentId: draft.experiment,
+                protocolId: draft.protocol.id,
+                values: draft.values
+            }, onData);
+        };
+        app.ingestList();
+    }
 
     function ingestList() {
         if (app.backend && app.backend.documents && app.backend.documents !== "{}")
@@ -325,6 +335,13 @@ Item {
                 app.page = "builder";
             }
             onOpenProtocol: function (protocolId) {
+                app.activeProtocol = Core.protocolById(protocolId);
+                if (app.activeProtocol)
+                    app.page = "form";
+            }
+            onFillInProtocol: function (protocolId) {
+                // A creator filling in their own form: the same screen a
+                // submitter gets, because it is the same act.
                 app.activeProtocol = Core.protocolById(protocolId);
                 if (app.activeProtocol)
                     app.page = "form";

@@ -372,6 +372,12 @@ impl Session {
         let key = self.creator_key.clone();
         for i in 0..self.experiments.len() {
             self.experiments[i]["creator"]["key"] = json!(key);
+            // And drop the example's author name. Leaving it would put a
+            // stranger's name against this node's key — the screen said
+            // "Nisha Kumar" over a key that is ours, which is worse than
+            // saying nothing. Blank reads as "Unnamed creator", exactly like
+            // a new experiment before a name is set.
+            self.experiments[i]["creator"]["name"] = json!("");
             if let Ok(signed) = self.signed(&self.experiments[i].clone()) {
                 self.experiments[i] = signed;
             }
@@ -1548,6 +1554,172 @@ impl Session {
             })?;
         }
         Ok(landed)
+    }
+
+    /// `submissions.submit` — make, sign, publish and keep a submission.
+    ///
+    /// The whole of SPEC 3.2 step 3 bar the announcement: validate against
+    /// the protocol, apply each field's store rule (notably `rounded_1km`,
+    /// which has to happen *before* anything is stored), sign, upload, keep.
+    ///
+    /// A creator submitting to their own experiment is an ordinary submitter
+    /// here, not a special case — the same validation, the same signature,
+    /// the same document. The only difference is that this node is also the
+    /// indexer, so the submission can be indexed immediately instead of
+    /// waiting to hear about itself over Delivery.
+    pub fn submit(&mut self, raw: &str, now: DateTime<Utc>) -> String {
+        self.start_publish_budget();
+        let request: Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
+        };
+        let Some(experiment_id) = request.get("experimentId").and_then(Value::as_str) else {
+            return api::envelope_err(api::code::BAD_REQUEST, "`experimentId` is required");
+        };
+        let experiment_id = experiment_id.to_string();
+        let Some(protocol_id) = request.get("protocolId").and_then(Value::as_str) else {
+            return api::envelope_err(api::code::BAD_REQUEST, "`protocolId` is required");
+        };
+        let protocol_id = protocol_id.to_string();
+        let Some(values) = request.get("values").filter(|v| v.is_object()).cloned() else {
+            return api::envelope_err(api::code::BAD_REQUEST, "`values` is required");
+        };
+
+        let Some(experiment) = self
+            .experiments
+            .iter()
+            .find(|e| e.get("id").and_then(Value::as_str) == Some(experiment_id.as_str()))
+            .cloned()
+        else {
+            return api::envelope_err(
+                api::code::BAD_REQUEST,
+                format!("no experiment `{experiment_id}` on this node"),
+            );
+        };
+        let Some(protocol) = self
+            .protocols
+            .iter()
+            .find(|p| p.get("id").and_then(Value::as_str) == Some(protocol_id.as_str()))
+            .cloned()
+        else {
+            return api::envelope_err(
+                api::code::BAD_REQUEST,
+                format!("no form `{protocol_id}` on this node"),
+            );
+        };
+
+        // The window, from the experiment rather than from the caller.
+        if Self::standing(&experiment, now) != Standing::Open {
+            return api::envelope_err(
+                api::code::REJECTED,
+                "this experiment is not open for submissions right now",
+            );
+        }
+
+        // Store rules first, then validate — in that order, and the order
+        // matters. Rounding is what `prepare_values` does, and the validator
+        // refuses an unrounded point for a `rounded_1km` field, so validating
+        // first rejects every honest location submission with "the point is
+        // not rounded". Preparing first also means the values that are
+        // checked are the values that will be stored, which is the pair that
+        // ought to agree.
+        //
+        // An exact coordinate that reaches a document is public forever
+        // (SPEC 2), so this has to happen before the document exists.
+        let prepared: Value = match serde_json::from_str(&api::submissions_prepare_values(
+            &json!({ "protocol": protocol, "values": values }).to_string(),
+        )) {
+            Ok(v) => v,
+            Err(e) => return api::envelope_err(api::code::INVALID_VALUES, e.to_string()),
+        };
+        if prepared["ok"] != json!(true) {
+            return prepared.to_string();
+        }
+        let values = prepared["data"]["values"].clone();
+
+        // Then validate, so a bad form comes back as field problems the
+        // person can fix rather than as a rejected document.
+        let report: Value = match serde_json::from_str(&api::submissions_validate(
+            &json!({ "protocol": protocol, "values": values, "now": now.to_rfc3339() }).to_string(),
+        )) {
+            Ok(v) => v,
+            Err(e) => return api::envelope_err(api::code::INVALID_VALUES, e.to_string()),
+        };
+        if report["data"]["ok"] != json!(true) {
+            return api::envelope_ok(json!({
+                "submitted": false,
+                "missing": report["data"]["missing"].clone(),
+                "errors": report["data"]["errors"].clone(),
+            }));
+        }
+
+        let submission = json!({
+            "schema": "collect/submission@1",
+            "id": uuid::Uuid::now_v7().to_string(),
+            "experiment": experiment_id,
+            "protocol": {
+                "id": protocol_id,
+                "version": protocol.get("version").and_then(Value::as_u64).unwrap_or(1),
+            },
+            "submitter": {
+                "key": self.creator_key,
+                "name": request.get("submitterName").and_then(Value::as_str).unwrap_or(""),
+            },
+            "submitted_at": now.to_rfc3339(),
+            "values": values,
+            "sig": "00".repeat(64),
+        });
+
+        let submission = match self.signed(&submission) {
+            Ok(signed) => signed,
+            Err(e) => return api::envelope_err(api::code::NOT_WIRED, e),
+        };
+        let errors = schema::errors_as(&submission, schema::Kind::Submission);
+        if !errors.is_empty() {
+            return api::envelope_err(
+                api::code::INVALID_DOCUMENT,
+                format!("the submission does not validate: {}", errors.join("; ")),
+            );
+        }
+
+        let submission_key = format!("submission:{}", submission["id"].as_str().unwrap_or(""));
+        self.publish_doc("submission", &submission_key, &submission);
+        let cid = self.cid_of(&submission_key).map(str::to_string);
+
+        self.submissions.push(submission.clone());
+
+        // This node is the creator, so it is also the indexer: index now
+        // rather than waiting to hear about our own submission over
+        // Delivery. Without a CID there is nothing to index — the entry is
+        // an address — so that waits for a successful publish.
+        let mut indexed = Value::Null;
+        if experiment.pointer("/creator/key").and_then(Value::as_str) == Some(&self.creator_key) {
+            if let Some(cid) = cid.clone() {
+                let entry = crate::indexer::Entry {
+                    cid,
+                    protocol: protocol_id.clone(),
+                    version: submission.pointer("/protocol/version").and_then(Value::as_u64).unwrap_or(1),
+                    submitter: self.creator_key.clone(),
+                    submitted_at: submission["submitted_at"].as_str().unwrap_or("").to_string(),
+                    received_at: now.to_rfc3339(),
+                };
+                match self.index_entry(&experiment_id, entry, now) {
+                    Ok(page) => indexed = json!(page),
+                    Err(e) => eprintln!("collect_core: could not index our own submission: {e}"),
+                }
+            }
+        }
+
+        let mut data = json!({
+            "submitted": true,
+            "missing": [],
+            "errors": {},
+            "submission": submission,
+            "cid": cid,
+            "index_page": indexed,
+        });
+        merge(&mut data, self.publish_report(&submission_key));
+        api::envelope_ok(data)
     }
 
     /// `results.export` — write the results table out as a file.
@@ -3609,6 +3781,139 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    /// A creator with an open experiment and one form, ready to submit to it.
+    fn creator_ready_to_submit(scratch: &Scratch) -> (Session, String) {
+        let mut s = publishing_in(scratch);
+        let now = at("2026-10-28T08:00:00Z");
+        let made = data(&s.create(&create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"), now));
+        let id = made["experiment"]["id"].as_str().unwrap().to_string();
+        data(&s.save_protocol(&draft_for(&id), now));
+        (s, id)
+    }
+
+    fn submit_request(id: &str, count: i64) -> String {
+        json!({
+            "experimentId": id,
+            "protocolId": "bird-sighting",
+            "values": { "count": count },
+            "submitterName": "Dr Rao"
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn a_creator_can_submit_to_their_own_experiment() {
+        // An ordinary submitter, not a special case: same validation, same
+        // signature, same document. Only the indexing differs, because this
+        // node is also the indexer.
+        let scratch = Scratch::new("selfsubmit");
+        let (mut s, id) = creator_ready_to_submit(&scratch);
+        let out = data(&s.submit(&submit_request(&id, 3), at("2026-10-28T09:00:00Z")));
+
+        assert_eq!(out["submitted"], json!(true), "{out}");
+        assert_eq!(out["published"], json!(true), "{out}");
+        let cid = out["cid"].as_str().expect("a cid");
+        assert!(cid.starts_with("logos:"), "{cid}");
+        // Indexed immediately rather than waiting to hear about itself.
+        assert_eq!(out["index_page"], json!(1));
+
+        // And it is in the creator's own results table.
+        let table = data(&s.results(
+            &json!({ "experimentId": id, "protocolId": "bird-sighting" }).to_string(),
+        ));
+        assert_eq!(table["rows"].as_array().unwrap().len(), 1, "{table}");
+        assert_eq!(table["rows"][0]["values"]["count"], json!(3));
+        assert_eq!(table["rows"][0]["cid"], json!(cid));
+        assert_eq!(table["rows"][0]["submitter_name"], json!("Dr Rao"));
+    }
+
+    #[test]
+    fn a_submission_is_signed_by_the_submitter() {
+        let scratch = Scratch::new("submitsig");
+        let (mut s, id) = creator_ready_to_submit(&scratch);
+        let out = data(&s.submit(&submit_request(&id, 2), at("2026-10-28T09:00:00Z")));
+        let doc = &out["submission"];
+        assert_eq!(doc["submitter"]["key"], json!(s.creator_key()));
+        assert!(crate::sign::verify(doc).is_ok(), "{doc}");
+    }
+
+    #[test]
+    fn a_submission_that_fails_the_form_comes_back_as_field_problems() {
+        // Not a rejected document: the person has to be able to fix it.
+        let scratch = Scratch::new("submitbad");
+        let (mut s, id) = creator_ready_to_submit(&scratch);
+        let out = data(&s.submit(
+            &json!({ "experimentId": id, "protocolId": "bird-sighting", "values": {} }).to_string(),
+            at("2026-10-28T09:00:00Z"),
+        ));
+        assert_eq!(out["submitted"], json!(false), "{out}");
+        assert!(out["missing"].as_array().unwrap().contains(&json!("count")), "{out}");
+        // Nothing was kept.
+        assert_eq!(s.submissions.len(), 0);
+    }
+
+    #[test]
+    fn a_closed_experiment_refuses_a_submission() {
+        let scratch = Scratch::new("submitclosed");
+        let (mut s, id) = creator_ready_to_submit(&scratch);
+        // Well after the end date.
+        let out = envelope(&s.submit(&submit_request(&id, 1), at("2027-01-01T00:00:00Z")));
+        assert_eq!(out["ok"], json!(false));
+        assert_eq!(out["error"]["code"], json!("rejected"));
+    }
+
+    #[test]
+    fn store_rules_are_applied_before_the_document_exists() {
+        // An exact coordinate that reaches a document is public forever.
+        let scratch = Scratch::new("submitround");
+        let mut s = publishing_in(&scratch);
+        let now = at("2026-10-28T08:00:00Z");
+        let made = data(&s.create(&create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"), now));
+        let id = made["experiment"]["id"].as_str().unwrap().to_string();
+        data(&s.save_protocol(
+            &json!({
+                "experimentId": id,
+                "protocol": {
+                    "name": "Where",
+                    "fields": [ {
+                        "key": "where", "type": "location", "label": "Where", "required": true,
+                        "config": { "methods": ["manual"], "store": "rounded_1km" }
+                    } ]
+                }
+            })
+            .to_string(),
+            now,
+        ));
+
+        let out = data(&s.submit(
+            &json!({
+                "experimentId": id,
+                "protocolId": "where",
+                "values": { "where": { "lat": 12.97712, "lon": 77.59581, "method": "manual" } }
+            })
+            .to_string(),
+            at("2026-10-28T09:00:00Z"),
+        ));
+        assert_eq!(out["submitted"], json!(true), "{out}");
+        let stored = &out["submission"]["values"]["where"];
+        // Snapped to its cell centre, not the coordinate that was handed in.
+        assert_ne!(stored["lat"], json!(12.97712));
+        assert_eq!(stored["lat"], json!(12.975));
+        assert_eq!(stored["lon"], json!(77.595));
+    }
+
+    #[test]
+    fn the_seeded_example_does_not_keep_someone_elses_name_on_our_key() {
+        // It read "Nisha Kumar" over a key that is ours, which is worse than
+        // saying nothing.
+        let scratch = Scratch::new("reauthorname");
+        let mut s = seeded();
+        s.attach_identity(scratch.0.to_str().unwrap()).expect("identity");
+        s.reauthor_fixtures();
+        assert_eq!(s.experiments[0]["creator"]["name"], json!(""));
+        assert_eq!(s.experiments[0]["creator"]["key"], json!(s.creator_key()));
     }
 
     /// A store two owners can look at: the session takes a `Box`, and a test

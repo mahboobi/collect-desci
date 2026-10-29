@@ -63,6 +63,10 @@ pub trait CollectCoreModule: Send + 'static {
     /// reaches a document.
     fn submissions_prepare_values(&mut self, request: String) -> String;
 
+    /// Make, sign, publish and keep a submission. A creator submitting to
+    /// their own experiment goes through here like anyone else.
+    fn submissions_submit(&mut self, request: String) -> String;
+
     /// Read a photo's metadata, then return the cleaned bytes to upload and
     /// the values to prefill from it. The original is never returned.
     fn submissions_process_media(&mut self, request: String) -> String;
@@ -423,6 +427,11 @@ impl CollectCoreModule for Collect {
         api::submissions_prepare_values(&request)
     }
 
+    fn submissions_submit(&mut self, request: String) -> String {
+        let now = chrono::Utc::now();
+        self.session().submit(&request, now)
+    }
+
     fn submissions_process_media(&mut self, request: String) -> String {
         api::submissions_process_media(&request)
     }
@@ -552,6 +561,7 @@ impl CollectCoreModule for Collect {
             "submitters.hide" => self.session().set_hidden(&request, true, now),
             "submitters.show" => self.session().set_hidden(&request, false, now),
             "results.export" => self.session().export(&request, now),
+            "submissions.submit" => self.session().submit(&request, now),
             "delivery.status" => self.delivery_status(),
             "delivery.drain" => self.session().drain(now),
             "delivery.publishHead" => self.session().publish_head(&request, now),
