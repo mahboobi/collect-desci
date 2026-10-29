@@ -11,7 +11,7 @@
 //! than faked.
 
 use crate::store::{self, DocumentStore};
-use crate::{api, fields, identity::Identity, ids, schema};
+use crate::{api, export, fields, identity::Identity, ids, schema};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -96,6 +96,10 @@ pub struct Session {
     store: Option<Box<dyn DocumentStore>>,
     /// Upload outcome per document id. See `Publication`.
     publications: BTreeMap<String, Publication>,
+    /// The host's per-instance directory, once we have been given one. Where
+    /// exports are written, because the QML side cannot write files at all
+    /// and this is the only place we are promised is writable.
+    state_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for Session {
@@ -118,6 +122,7 @@ impl Session {
             identity: None,
             store: None,
             publications: BTreeMap::new(),
+            state_dir: None,
         };
         if api::fixtures_enabled() {
             session.seed_fixtures();
@@ -199,15 +204,10 @@ impl Session {
             Err(e) => return api::envelope_err(api::code::INVALID_PROTOCOL, e.to_string()),
         };
 
-        // Who the creator has hidden, across every page.
-        let hidden: Vec<String> = self
-            .index_pages
-            .iter()
-            .filter_map(|p| p.get("hidden_keys").and_then(Value::as_array))
-            .flatten()
-            .filter_map(Value::as_str)
-            .map(str::to_string)
-            .collect();
+        // Who the creator currently hides. From the newest page for this
+        // experiment, not the union of all of them — see
+        // `indexer::hidden_keys`.
+        let hidden = self.hidden_for(experiment_id);
 
         // The index entry for a submission.
         //
@@ -321,6 +321,7 @@ impl Session {
         let identity = Identity::load_or_create(Path::new(persistence_path))
             .map_err(|e| e.to_string())?;
         let public = identity.public_hex();
+        self.state_dir = Some(Path::new(persistence_path).to_path_buf());
         if !api::fixtures_enabled() {
             self.creator_key = public.clone();
         }
@@ -379,12 +380,12 @@ impl Session {
     /// `None` means no Storage is attached, so nothing was attempted — which
     /// is reported differently from a failure, because a creator can do
     /// nothing about the first and may want to retry the second.
-    fn publish_doc(&mut self, kind: &str, doc: &Value) -> Option<Publication> {
-        let id = doc
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
+    /// `key` is how the outcome is looked up later. Passed in rather than
+    /// read off the document because an index page has no `id` — it is
+    /// identified by its experiment and page number — and keying those all on
+    /// the empty string would have them overwrite each other.
+    fn publish_doc(&mut self, kind: &str, key: &str, doc: &Value) -> Option<Publication> {
+        let id = key.to_string();
         // Scoped so the immutable borrow of `store` is over before the map is
         // written.
         let result = {
@@ -422,6 +423,14 @@ impl Session {
     /// this, attaching a form would upload a manifest whose signature no
     /// longer verifies, and every reader would reject it.
     fn reseal(&mut self, experiment_id: &str) -> Result<Value, String> {
+        self.reseal_with(experiment_id, |_| {})
+    }
+
+    /// `reseal`, with an edit applied to the document first.
+    fn reseal_with<F>(&mut self, experiment_id: &str, edit: F) -> Result<Value, String>
+    where
+        F: FnOnce(&mut Value),
+    {
         let Some(at) = self
             .experiments
             .iter()
@@ -435,6 +444,7 @@ impl Session {
             None => Value::Null,
         };
         let mut doc = self.experiments[at].clone();
+        edit(&mut doc);
         let version = doc.get("version").and_then(Value::as_u64).unwrap_or(1) + 1;
         doc["version"] = json!(version);
         doc["prev"] = prev;
@@ -450,8 +460,22 @@ impl Session {
             ));
         }
 
+        // The signature must verify against the key the document itself
+        // names. It does not follow from signing succeeding: we sign with
+        // whatever identity this node has, and an experiment authored by
+        // someone else — the embedded fixture, or one fetched from another
+        // creator — names a key we do not hold. Resealing that would produce
+        // a document no reader could verify, and nothing downstream would
+        // notice, because `sig` is just hex to the contract.
+        if let Err(e) = crate::sign::verify(&doc) {
+            return Err(format!(
+                "this node cannot sign for `{}`: {e}",
+                doc.pointer("/creator/key").and_then(Value::as_str).unwrap_or("?")
+            ));
+        }
+
         self.experiments[at] = doc.clone();
-        self.publish_doc("experiment", &doc);
+        self.publish_doc("experiment", experiment_id, &doc);
         Ok(doc)
     }
 
@@ -606,59 +630,24 @@ impl Session {
             Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
         };
 
-        let text = |key: &str| request.get(key).and_then(Value::as_str).unwrap_or("").trim().to_string();
-        let title = text("title");
-        let description = text("description");
-        let starts_at = text("startsAt");
-        let ends_at = text("endsAt");
-        let timezone = {
-            let tz = text("timezone");
-            if tz.is_empty() { "UTC".to_string() } else { tz }
-        };
-
-        // The field-level complaints the C2 form shows inline.
-        let mut problems: Vec<Value> = Vec::new();
-        if title.is_empty() {
-            problems.push(json!({ "field": "title", "message": "A title is required" }));
-        }
-        if title.chars().count() > 140 {
-            problems.push(json!({ "field": "title", "message": "At most 140 characters" }));
-        }
-        if description.chars().count() > 5000 {
-            problems.push(json!({ "field": "description", "message": "At most 5000 characters" }));
-        }
-        let from = DateTime::parse_from_rfc3339(&starts_at);
-        let to = DateTime::parse_from_rfc3339(&ends_at);
-        if from.is_err() {
-            problems.push(json!({ "field": "startsAt", "message": "A start date is required" }));
-        }
-        if to.is_err() {
-            problems.push(json!({ "field": "endsAt", "message": "An end date is required" }));
-        }
-        // SPEC 3.1: the end must not be before the start.
-        if let (Ok(f), Ok(t)) = (&from, &to) {
-            if t < f {
-                problems.push(json!({
-                    "field": "endsAt",
-                    "message": "The end date cannot be before the start date"
-                }));
+        let details = match Details::read(&request) {
+            Ok(d) => d,
+            Err(problems) => {
+                return api::envelope_ok(json!({ "created": false, "problems": problems }))
             }
-        }
-        if !problems.is_empty() {
-            return api::envelope_ok(json!({ "created": false, "problems": problems }));
-        }
+        };
 
         let id = ids::experiment_id(&[0u8; 32], &ids::new_nonce());
         let experiment = json!({
             "schema": "collect/experiment@1",
             "id": id,
             "version": 1,
-            "creator": { "key": self.creator_key, "name": text("creatorName") },
-            "title": title,
-            "description": description,
-            "starts_at": from.unwrap().to_rfc3339(),
-            "ends_at": to.unwrap().to_rfc3339(),
-            "timezone": timezone,
+            "creator": { "key": self.creator_key, "name": details.creator_name },
+            "title": details.title,
+            "description": details.description,
+            "starts_at": details.starts_at,
+            "ends_at": details.ends_at,
+            "timezone": details.timezone,
             "protocols": [],
             "index": Value::Null,
             "prev": Value::Null,
@@ -687,7 +676,7 @@ impl Session {
         // Publish after the document is complete and validated, never before:
         // a CID is the address of these exact bytes, so uploading a draft
         // would publish an address nothing else ever refers to.
-        self.publish_doc("experiment", &experiment);
+        self.publish_doc("experiment", &id, &experiment);
         let mut data = json!({
             "created": true,
             "problems": [],
@@ -695,6 +684,464 @@ impl Session {
         });
         merge(&mut data, self.publish_report(&id));
         api::envelope_ok(data)
+    }
+
+    /// `experiments.update` — edit an experiment's details.
+    ///
+    /// Only the details: the forms are `protocols.saveDraft`'s business and
+    /// the creator cannot be changed at all, because the signature is what
+    /// makes the attribution mean anything. Like every other amendment this
+    /// produces a new signed version rather than patching the old one.
+    ///
+    /// Narrowing the window is allowed but reported: submissions already
+    /// accepted outside the new dates stay accepted, because they were valid
+    /// when they were made and the index that recorded them is published.
+    /// Silently dropping them would rewrite history the submitter can see.
+    pub fn update(&mut self, raw: &str, now: DateTime<Utc>) -> String {
+        let request: Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
+        };
+        let Some(wanted) = request.get("experimentId").and_then(Value::as_str) else {
+            return api::envelope_err(api::code::BAD_REQUEST, "`experimentId` is required");
+        };
+        let wanted = wanted.to_string();
+        let Some(existing) = self
+            .experiments
+            .iter()
+            .find(|e| e.get("id").and_then(Value::as_str) == Some(wanted.as_str()))
+        else {
+            return api::envelope_err(
+                api::code::BAD_REQUEST,
+                format!("no experiment `{wanted}` on this node"),
+            );
+        };
+        if existing.pointer("/creator/key").and_then(Value::as_str) != Some(&self.creator_key) {
+            return api::envelope_err(
+                api::code::NOT_YOURS,
+                "only the creator of an experiment can change it",
+            );
+        }
+
+        let details = match Details::read(&request) {
+            Ok(d) => d,
+            Err(problems) => {
+                return api::envelope_ok(json!({ "updated": false, "problems": problems }))
+            }
+        };
+
+        // Which already-accepted submissions the new window would exclude.
+        // Computed before the edit so it describes the change, not the result.
+        let outside = self.submissions_outside(&wanted, &details.starts_at, &details.ends_at);
+
+        let updated = {
+            let d = details.clone();
+            self.reseal_with(&wanted, move |doc| {
+                doc["title"] = json!(d.title);
+                doc["description"] = json!(d.description);
+                doc["starts_at"] = json!(d.starts_at);
+                doc["ends_at"] = json!(d.ends_at);
+                doc["timezone"] = json!(d.timezone);
+                // The creator's display name is theirs to change; the key is
+                // not, and is left exactly as signed.
+                if let Some(name) = doc.pointer_mut("/creator/name") {
+                    *name = json!(d.creator_name);
+                }
+            })
+        };
+        let updated = match updated {
+            Ok(doc) => doc,
+            Err(e) => return api::envelope_err(api::code::INVALID_DOCUMENT, e),
+        };
+
+        let mut warnings: Vec<Value> = Vec::new();
+        if outside > 0 {
+            warnings.push(json!({
+                "code": "submissions_outside_window",
+                "message": format!(
+                    "{outside} submission(s) already accepted fall outside the new dates. They stay accepted."
+                ),
+            }));
+        }
+        let _ = now;
+
+        let mut data = json!({
+            "updated": true,
+            "problems": [],
+            "experiment": updated,
+            "warnings": warnings,
+        });
+        merge(&mut data, self.publish_report(&wanted));
+        api::envelope_ok(data)
+    }
+
+    /// How many submissions this node holds for `experiment` fall outside the
+    /// given window.
+    fn submissions_outside(&self, experiment: &str, starts_at: &str, ends_at: &str) -> usize {
+        let from = DateTime::parse_from_rfc3339(starts_at).ok();
+        let to = DateTime::parse_from_rfc3339(ends_at).ok();
+        let (Some(from), Some(to)) = (from, to) else { return 0 };
+        self.submissions
+            .iter()
+            .filter(|s| s.get("experiment").and_then(Value::as_str) == Some(experiment))
+            .filter(|s| {
+                match s
+                    .get("submitted_at")
+                    .and_then(Value::as_str)
+                    .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+                {
+                    Some(at) => at < from || at > to,
+                    None => false,
+                }
+            })
+            .count()
+    }
+
+    /// Who the creator currently hides for one experiment.
+    fn hidden_for(&self, experiment_id: &str) -> Vec<String> {
+        let pages: Vec<Value> = self
+            .index_pages
+            .iter()
+            .filter(|p| p.get("experiment").and_then(Value::as_str) == Some(experiment_id))
+            .cloned()
+            .collect();
+        crate::indexer::hidden_keys(&pages)
+    }
+
+    /// `results.export` — write the results table out as a file.
+    ///
+    /// A file rather than a string, because the UI cannot make one: the QML
+    /// side has no filesystem at all, so if the creator is to end up with a
+    /// CSV, this is what writes it. The path comes back for the UI to show,
+    /// along with the text itself when it is small enough to preview.
+    ///
+    /// Built on top of `results`, deliberately, rather than reading the
+    /// submissions again. Hidden submitters, the protocol's column order and
+    /// the label-for-a-removed-option rule all live there, and an export that
+    /// re-derived them could disagree with the table on screen. A hidden
+    /// submitter reappearing in a spreadsheet is exactly the failure that
+    /// would not be noticed until it mattered.
+    pub fn export(&mut self, raw: &str, now: DateTime<Utc>) -> String {
+        let request: Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
+        };
+        let format = match request.get("format").and_then(Value::as_str) {
+            // CSV is the default because it is what a spreadsheet opens.
+            None => export::Format::Csv,
+            Some(name) => match export::Format::parse(name) {
+                Some(f) => f,
+                None => {
+                    return api::envelope_err(
+                        api::code::BAD_REQUEST,
+                        format!("`{name}` is not a format: use `csv` or `json`"),
+                    )
+                }
+            },
+        };
+        let with_media = request
+            .get("includeMedia")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        // The same table the creator is looking at.
+        let table: Value = match serde_json::from_str(&self.results(raw)) {
+            Ok(v) => v,
+            Err(e) => {
+                return api::envelope_err(
+                    api::code::INVALID_DOCUMENT,
+                    format!("the results table was not readable: {e}"),
+                )
+            }
+        };
+        if table["ok"] != json!(true) {
+            // Pass the reason straight through rather than restating it.
+            return table.to_string();
+        }
+        let data = &table["data"];
+        let empty: Vec<Value> = Vec::new();
+        let columns = data["columns"].as_array().unwrap_or(&empty);
+        let rows = data["rows"].as_array().unwrap_or(&empty);
+
+        let experiment_id = request.get("experimentId").and_then(Value::as_str).unwrap_or("");
+        let protocol_id = request.get("protocolId").and_then(Value::as_str).unwrap_or("");
+        let name = export::filename(experiment_id, protocol_id, format, &now.to_rfc3339());
+        let text = match format {
+            export::Format::Csv => export::csv(columns, rows),
+            export::Format::Json => export::json_export(&data["protocol"], columns, rows),
+        };
+
+        let Some(state) = self.state_dir.clone() else {
+            return api::envelope_err(
+                api::code::NOT_WIRED,
+                "there is nowhere to write to yet: the module context is not ready",
+            );
+        };
+
+        // With media the export becomes a folder, because a CSV naming photo
+        // CIDs is no use without the photos beside it.
+        let stem = name.trim_end_matches(&format!(".{}", format.extension())).to_string();
+        let dir = if with_media {
+            state.join("exports").join(&stem)
+        } else {
+            state.join("exports")
+        };
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            return api::envelope_err(
+                api::code::REJECTED,
+                format!("cannot make {}: {e}", dir.display()),
+            );
+        }
+        let path = dir.join(&name);
+        if let Err(e) = std::fs::write(&path, text.as_bytes()) {
+            return api::envelope_err(
+                api::code::REJECTED,
+                format!("cannot write {}: {e}", path.display()),
+            );
+        }
+
+        let media = if with_media {
+            self.export_media(rows, &dir.join("media"))
+        } else {
+            json!({ "requested": false })
+        };
+
+        api::envelope_ok(json!({
+            "format": format.extension(),
+            "mime": format.mime(),
+            "filename": name,
+            "path": path.to_string_lossy(),
+            "bytes": text.len(),
+            "rows": rows.len(),
+            "columns": columns.len(),
+            "media": media,
+            // Small enough to show or copy in the UI. Withheld rather than
+            // truncated above the cap: half a CSV looks like a whole one.
+            "text": if text.len() <= PREVIEW_CAP { json!(text) } else { Value::Null },
+        }))
+    }
+
+    /// Fetch every photo named by `rows` into `dir`.
+    ///
+    /// A fetch that fails is reported and does not fail the export: the table
+    /// is the data, the photos are attachments to it, and losing the CSV
+    /// because one image is not on this node would be the wrong trade. `local`
+    /// is true — these are documents this node already received, and a
+    /// network round trip per photo would turn an export into a long wait.
+    fn export_media(&self, rows: &[Value], dir: &Path) -> Value {
+        let mut wanted: Vec<String> = Vec::new();
+        for row in rows {
+            if let Some(values) = row.get("values").and_then(Value::as_object) {
+                for value in values.values() {
+                    collect_media_cids(value, &mut wanted);
+                }
+            }
+        }
+        wanted.sort();
+        wanted.dedup();
+
+        if wanted.is_empty() {
+            return json!({ "requested": true, "wanted": 0, "written": 0, "failed": [] });
+        }
+        let Some(store) = self.store.as_deref() else {
+            return json!({
+                "requested": true,
+                "wanted": wanted.len(),
+                "written": 0,
+                "failed": [{ "code": "storage_unavailable",
+                             "message": "no Logos Storage is attached, so the photos cannot be fetched" }],
+            });
+        };
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            return json!({
+                "requested": true,
+                "wanted": wanted.len(),
+                "written": 0,
+                "failed": [{ "code": "rejected", "message": format!("cannot make {}: {e}", dir.display()) }],
+            });
+        }
+
+        let mut written = 0usize;
+        let mut failed: Vec<Value> = Vec::new();
+        for cid in &wanted {
+            match store.get(store::bare_cid(cid), true) {
+                Ok(bytes) => {
+                    // Named by CID: the CSV cell holds the CID, so the row
+                    // and the file match without a lookup table.
+                    let file = dir.join(format!("{}.bin", store::bare_cid(cid)));
+                    match std::fs::write(&file, &bytes) {
+                        Ok(()) => written += 1,
+                        Err(e) => failed.push(json!({
+                            "cid": cid,
+                            "code": "rejected",
+                            "message": format!("cannot write {}: {e}", file.display()),
+                        })),
+                    }
+                }
+                Err(e) => failed.push(json!({
+                    "cid": cid,
+                    "code": e.code(),
+                    "message": e.to_string(),
+                })),
+            }
+        }
+        json!({
+            "requested": true,
+            "wanted": wanted.len(),
+            "written": written,
+            "failed": failed,
+        })
+    }
+
+    /// `submitters.hide` and `submitters.show` — drop a submitter's rows from
+    /// the index, or put them back.
+    ///
+    /// Hiding is **not** deletion and cannot be: the submission documents are
+    /// on Storage, `remove()` is local-only, and the DHT record is never
+    /// withdrawn (SPEC 2). What this does is rewrite the index so the
+    /// creator's results, table and exports all stop counting them — which
+    /// works because every one of those reads through `hidden_for`.
+    ///
+    /// It is a published act, not a private setting: the new index page is
+    /// signed and uploaded, so a submitter can see they were hidden. That is
+    /// deliberate — a moderation decision nobody can observe is worse than
+    /// one they can.
+    pub fn set_hidden(&mut self, raw: &str, hide: bool, now: DateTime<Utc>) -> String {
+        let request: Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
+        };
+        let Some(experiment_id) = request.get("experimentId").and_then(Value::as_str) else {
+            return api::envelope_err(api::code::BAD_REQUEST, "`experimentId` is required");
+        };
+        let experiment_id = experiment_id.to_string();
+        let Some(submitter) = request.get("submitter").and_then(Value::as_str) else {
+            return api::envelope_err(api::code::BAD_REQUEST, "`submitter` is required");
+        };
+        let submitter = submitter.to_string();
+        if !ids::is_key(&submitter) {
+            return api::envelope_err(
+                api::code::BAD_REQUEST,
+                "`submitter` must be a 64-character hex key",
+            );
+        }
+        let Some(experiment) = self
+            .experiments
+            .iter()
+            .find(|e| e.get("id").and_then(Value::as_str) == Some(experiment_id.as_str()))
+        else {
+            return api::envelope_err(
+                api::code::BAD_REQUEST,
+                format!("no experiment `{experiment_id}` on this node"),
+            );
+        };
+        if experiment.pointer("/creator/key").and_then(Value::as_str) != Some(&self.creator_key) {
+            return api::envelope_err(
+                api::code::NOT_YOURS,
+                "only the creator of an experiment can hide a submitter",
+            );
+        }
+        // The creator hiding themselves would make their own experiment
+        // unreadable to them for no reason anyone wants.
+        if submitter == self.creator_key && hide {
+            return api::envelope_err(
+                api::code::BAD_REQUEST,
+                "the creator cannot hide themselves",
+            );
+        }
+
+        let mut hidden = self.hidden_for(&experiment_id);
+        let already = hidden.iter().any(|k| k == &submitter);
+        if hide && !already {
+            hidden.push(submitter.clone());
+        } else if !hide && already {
+            hidden.retain(|k| k != &submitter);
+        } else {
+            // Nothing to publish. Saying so beats emitting an identical page
+            // at a new address and calling it a change.
+            return api::envelope_ok(json!({
+                "changed": false,
+                "hidden": hidden,
+                "published": false,
+                "note": "Already in that state.",
+            }));
+        }
+
+        // Rebuilt through the same pager the indexer uses, with no new
+        // entries: one code path for paging, so hiding cannot produce a page
+        // shape that indexing never would.
+        let newest = self
+            .index_pages
+            .iter()
+            .filter(|p| p.get("experiment").and_then(Value::as_str) == Some(experiment_id.as_str()))
+            .max_by_key(|p| p.get("page").and_then(Value::as_u64).unwrap_or(0))
+            .cloned();
+        let newest_cid = newest
+            .as_ref()
+            .and_then(|p| p.get("page").and_then(Value::as_u64))
+            .map(|n| self.page_key(&experiment_id, n))
+            .and_then(|key| self.cid_of(&key).map(str::to_string));
+
+        let pages = crate::indexer::page_entries(
+            &experiment_id,
+            newest.as_ref(),
+            newest_cid.as_deref(),
+            &[],
+            &hidden,
+            now,
+        );
+
+        let mut newest_page_cid: Option<String> = None;
+        for page in pages {
+            let page = match self.signed(&page) {
+                Ok(signed) => signed,
+                Err(e) => return api::envelope_err(api::code::NOT_WIRED, e),
+            };
+            let errors = schema::errors_as(&page, schema::Kind::Index);
+            if !errors.is_empty() {
+                return api::envelope_err(
+                    api::code::INVALID_DOCUMENT,
+                    format!("the rewritten index page does not validate: {}", errors.join("; ")),
+                );
+            }
+            let number = page.get("page").and_then(Value::as_u64).unwrap_or(1);
+            let key = self.page_key(&experiment_id, number);
+            self.index_pages.retain(|p| {
+                !(p.get("experiment").and_then(Value::as_str) == Some(experiment_id.as_str())
+                    && p.get("page").and_then(Value::as_u64) == Some(number))
+            });
+            self.index_pages.push(page.clone());
+            self.publish_doc("index", &key, &page);
+            if let Some(cid) = self.cid_of(&key) {
+                newest_page_cid = Some(cid.to_string());
+            }
+        }
+
+        // The manifest names the latest index page, so it has to be re-signed
+        // too — otherwise a reader following the manifest would fetch the old
+        // page and not see the change.
+        if let Some(cid) = newest_page_cid.clone() {
+            if let Err(e) = self.reseal_with(&experiment_id, move |doc| {
+                doc["index"] = json!(cid);
+            }) {
+                return api::envelope_err(api::code::INVALID_DOCUMENT, e);
+            }
+        }
+
+        let mut data = json!({
+            "changed": true,
+            "hidden": self.hidden_for(&experiment_id),
+            "submitter": submitter,
+            "hiding": hide,
+        });
+        merge(&mut data, self.publish_report(&experiment_id));
+        api::envelope_ok(data)
+    }
+
+    /// How an index page's publication is keyed. Pages have no `id`, so this
+    /// is the identity used in its place.
+    fn page_key(&self, experiment_id: &str, page: u64) -> String {
+        format!("{experiment_id}#index{page}")
     }
 
     /// `experiments.publish` — try again to put a document on Storage.
@@ -731,7 +1178,7 @@ impl Session {
         }
 
         let id = wanted.to_string();
-        self.publish_doc("experiment", &doc);
+        self.publish_doc("experiment", &id, &doc);
         let mut data = json!({ "experiment": doc });
         merge(&mut data, self.publish_report(&id));
         api::envelope_ok(data)
@@ -825,7 +1272,7 @@ impl Session {
         // The form goes up first, so the manifest entry can name a real
         // address. `logos:pending` stands in only while there is no Storage;
         // it is a placeholder a reader can recognise, not a fake CID.
-        self.publish_doc("protocol", &protocol);
+        self.publish_doc("protocol", &protocol_id, &protocol);
         let protocol_cid = self
             .cid_of(&protocol_id)
             .unwrap_or("logos:pending")
@@ -870,6 +1317,117 @@ impl Session {
         });
         merge(&mut data, self.publish_report(&protocol_id));
         api::envelope_ok(data)
+    }
+}
+
+/// How much export text travels back to the UI for preview. Above this the
+/// path is all it gets: half a CSV looks exactly like a whole one.
+const PREVIEW_CAP: usize = 256 * 1024;
+
+/// Every media CID inside one submitted value, at any depth.
+///
+/// Recursive because a photo field holds an array of media objects while a
+/// future field type might nest them differently, and a missed CID means a
+/// silently incomplete media export.
+fn collect_media_cids(value: &Value, into: &mut Vec<String>) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                collect_media_cids(item, into);
+            }
+        }
+        Value::Object(map) => {
+            // A media entry, as the contract defines it: a CID with the
+            // hash and type of the bytes it addresses. The `sha256` is what
+            // distinguishes it from any other object that happens to carry a
+            // `cid`, such as a protocol reference in a manifest.
+            match (map.get("cid").and_then(Value::as_str), map.get("sha256")) {
+                (Some(cid), Some(_)) => into.push(cid.to_string()),
+                _ => {
+                    for nested in map.values() {
+                        collect_media_cids(nested, into);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The experiment detail fields, validated once for both `create` and
+/// `update`.
+///
+/// Shared so the two cannot drift: a title length the form accepts on create
+/// and refuses on edit would be a bug only an editing user ever sees.
+#[derive(Clone)]
+struct Details {
+    title: String,
+    description: String,
+    /// RFC 3339, already parsed and re-formatted, so the caller cannot get a
+    /// string in that was never a date.
+    starts_at: String,
+    ends_at: String,
+    timezone: String,
+    creator_name: String,
+}
+
+impl Details {
+    /// `Err` carries the field-level complaints the C2 form shows inline.
+    fn read(request: &Value) -> Result<Details, Vec<Value>> {
+        let text = |key: &str| {
+            request
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
+        let title = text("title");
+        let description = text("description");
+        let timezone = {
+            let tz = text("timezone");
+            if tz.is_empty() { "UTC".to_string() } else { tz }
+        };
+
+        let mut problems: Vec<Value> = Vec::new();
+        if title.is_empty() {
+            problems.push(json!({ "field": "title", "message": "A title is required" }));
+        }
+        if title.chars().count() > 140 {
+            problems.push(json!({ "field": "title", "message": "At most 140 characters" }));
+        }
+        if description.chars().count() > 5000 {
+            problems.push(json!({ "field": "description", "message": "At most 5000 characters" }));
+        }
+        let from = DateTime::parse_from_rfc3339(&text("startsAt"));
+        let to = DateTime::parse_from_rfc3339(&text("endsAt"));
+        if from.is_err() {
+            problems.push(json!({ "field": "startsAt", "message": "A start date is required" }));
+        }
+        if to.is_err() {
+            problems.push(json!({ "field": "endsAt", "message": "An end date is required" }));
+        }
+        // SPEC 3.1: the end must not be before the start.
+        if let (Ok(f), Ok(t)) = (&from, &to) {
+            if t < f {
+                problems.push(json!({
+                    "field": "endsAt",
+                    "message": "The end date cannot be before the start date"
+                }));
+            }
+        }
+        if !problems.is_empty() {
+            return Err(problems);
+        }
+
+        Ok(Details {
+            title,
+            description,
+            starts_at: from.unwrap().to_rfc3339(),
+            ends_at: to.unwrap().to_rfc3339(),
+            timezone,
+            creator_name: text("creatorName"),
+        })
     }
 }
 
@@ -964,6 +1522,7 @@ mod tests {
             identity: None,
             store: None,
             publications: BTreeMap::new(),
+            state_dir: None,
         };
         let public = session
             .attach_identity(scratch.0.to_str().unwrap())
@@ -1167,7 +1726,7 @@ mod tests {
         let id = made["experiment"]["id"].as_str().unwrap().to_string();
         let first = s.publication(&id).unwrap().cid().unwrap().to_string();
         let doc = made["experiment"].clone();
-        s.publish_doc("experiment", &doc);
+        s.publish_doc("experiment", &id, &doc);
         assert_eq!(s.publication(&id).unwrap().cid().unwrap(), first);
     }
 
@@ -1230,6 +1789,546 @@ mod tests {
         let out = envelope(&s.publish_now(&json!({ "experimentId": "nope" }).to_string()));
         assert_eq!(out["ok"], json!(false));
         assert_eq!(out["error"]["code"], json!("bad_request"));
+    }
+
+    fn update_request(id: &str, title: &str, starts: &str, ends: &str) -> String {
+        json!({
+            "experimentId": id,
+            "title": title,
+            "description": "Counting birds, revised.",
+            "startsAt": starts,
+            "endsAt": ends,
+            "timezone": "Asia/Kolkata",
+            "creatorName": "Dr Rao"
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn editing_an_experiment_makes_a_new_signed_version() {
+        let scratch = Scratch::new("edit");
+        let mut s = publishing_in(&scratch);
+        let now = at("2026-10-28T08:00:00Z");
+        let made = data(&s.create(&create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"), now));
+        let id = made["experiment"]["id"].as_str().unwrap().to_string();
+        let first_cid = made["cid"].as_str().unwrap().to_string();
+
+        let out = data(&s.update(
+            &update_request(&id, "Urban birds, 2027", "2026-10-20T00:00:00Z", "2026-12-20T00:00:00Z"),
+            now,
+        ));
+        assert_eq!(out["updated"], json!(true), "{out}");
+        let doc = &out["experiment"];
+        assert_eq!(doc["title"], json!("Urban birds, 2027"));
+        assert_eq!(doc["description"], json!("Counting birds, revised."));
+        assert_eq!(doc["ends_at"], json!("2026-12-20T00:00:00+00:00"));
+        assert_eq!(doc["version"], json!(2));
+        assert_eq!(doc["prev"], json!(first_cid));
+
+        let mut key = [0u8; 32];
+        hex::decode_to_slice(s.creator_key(), &mut key).unwrap();
+        assert!(crate::sign::verify_with(doc, &key).is_ok(), "{doc}");
+
+        // The edit is what the dashboard and the detail screen now show.
+        assert_eq!(data(&s.list(now))["experiments"][0]["title"], json!("Urban birds, 2027"));
+        assert_eq!(
+            data(&s.get(&json!({ "experimentId": id }).to_string()))["experiment"]["title"],
+            json!("Urban birds, 2027")
+        );
+    }
+
+    #[test]
+    fn an_edit_is_republished_at_a_new_address() {
+        let scratch = Scratch::new("editpub");
+        let mut s = publishing_in(&scratch);
+        let now = at("2026-10-28T08:00:00Z");
+        let made = data(&s.create(&create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"), now));
+        let id = made["experiment"]["id"].as_str().unwrap().to_string();
+        let first = made["cid"].as_str().unwrap().to_string();
+        let out = data(&s.update(&update_request(&id, "Renamed", "2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"), now));
+        assert_eq!(out["published"], json!(true));
+        assert_ne!(out["cid"].as_str().unwrap(), first);
+    }
+
+    #[test]
+    fn an_edit_cannot_change_the_creator_key() {
+        // The key is what makes the attribution mean anything, so it is left
+        // exactly as signed even though the display name is editable.
+        let scratch = Scratch::new("editkey");
+        let mut s = publishing_in(&scratch);
+        let now = at("2026-10-28T08:00:00Z");
+        let made = data(&s.create(&create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"), now));
+        let id = made["experiment"]["id"].as_str().unwrap().to_string();
+        let mut request: Value =
+            serde_json::from_str(&update_request(&id, "Renamed", "2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z")).unwrap();
+        request["creator"] = json!({ "key": "ff".repeat(32), "name": "Someone else" });
+        let out = data(&s.update(&request.to_string(), now));
+        assert_eq!(out["experiment"]["creator"]["key"], json!(s.creator_key()));
+        assert_eq!(out["experiment"]["creator"]["name"], json!("Dr Rao"));
+    }
+
+    #[test]
+    fn an_experiment_someone_else_created_cannot_be_edited() {
+        // No scratch directory: the ownership check comes before signing, so
+        // this needs no key at all.
+        let mut s = seeded();
+        // The fixture is authored by the fixture key; make this node someone
+        // else, so the example is no longer ours.
+        s.creator_key = "bb".repeat(32);
+        let out = envelope(&s.update(
+            &update_request("q7k2m3x4w3b5n6tz", "Hijacked", "2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
+            at("2026-10-28T08:00:00Z"),
+        ));
+        assert_eq!(out["ok"], json!(false));
+        assert_eq!(out["error"]["code"], json!("not_yours"));
+    }
+
+    #[test]
+    fn an_edit_is_validated_with_the_same_rules_as_creation() {
+        let scratch = Scratch::new("editvalid");
+        let mut s = publishing_in(&scratch);
+        let now = at("2026-10-28T08:00:00Z");
+        let made = data(&s.create(&create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"), now));
+        let id = made["experiment"]["id"].as_str().unwrap().to_string();
+
+        let blank = data(&s.update(&update_request(&id, "", "2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"), now));
+        assert_eq!(blank["updated"], json!(false));
+        assert_eq!(blank["problems"][0]["field"], json!("title"));
+
+        let backwards = data(&s.update(
+            &update_request(&id, "Fine", "2026-11-20T00:00:00Z", "2026-10-20T00:00:00Z"),
+            now,
+        ));
+        assert_eq!(backwards["updated"], json!(false));
+        assert_eq!(backwards["problems"][0]["field"], json!("endsAt"));
+
+        // And a refused edit leaves the document alone — no version bump.
+        assert_eq!(
+            data(&s.get(&json!({ "experimentId": id }).to_string()))["experiment"]["version"],
+            json!(1)
+        );
+    }
+
+    /// An experiment of our own with one submission inside its window.
+    /// Only the two fields the window check reads are needed, and inventing a
+    /// whole signed submission would test nothing extra here.
+    fn with_one_submission(scratch: &Scratch) -> (Session, String) {
+        let mut s = publishing_in(scratch);
+        let made = data(&s.create(
+            &create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
+            at("2026-10-28T08:00:00Z"),
+        ));
+        let id = made["experiment"]["id"].as_str().unwrap().to_string();
+        s.submissions.push(json!({
+            "experiment": id,
+            "submitted_at": "2026-10-25T09:00:00Z",
+        }));
+        (s, id)
+    }
+
+    #[test]
+    fn narrowing_the_window_past_an_accepted_submission_warns_rather_than_dropping_it() {
+        // The submission was valid when it was made and the index that
+        // recorded it is published. Dropping it would rewrite history the
+        // submitter can see.
+        let scratch = Scratch::new("narrow");
+        let (mut s, id) = with_one_submission(&scratch);
+        let out = data(&s.update(
+            &update_request(&id, "Narrowed", "2026-11-01T00:00:00Z", "2026-11-20T00:00:00Z"),
+            at("2026-10-28T08:00:00Z"),
+        ));
+        assert_eq!(out["updated"], json!(true), "{out}");
+        assert_eq!(out["warnings"][0]["code"], json!("submissions_outside_window"));
+        assert!(out["warnings"][0]["message"].as_str().unwrap().contains('1'));
+        // Still there.
+        assert_eq!(s.submissions.len(), 1);
+    }
+
+    #[test]
+    fn an_edit_that_keeps_every_submission_in_range_warns_about_nothing() {
+        let scratch = Scratch::new("widen");
+        let (mut s, id) = with_one_submission(&scratch);
+        let out = data(&s.update(
+            &update_request(&id, "Widened", "2026-10-01T00:00:00Z", "2026-12-31T00:00:00Z"),
+            at("2026-10-28T08:00:00Z"),
+        ));
+        assert_eq!(out["warnings"], json!([]));
+    }
+
+    #[test]
+    fn an_experiment_this_node_cannot_sign_for_is_not_resealed() {
+        // The embedded fixture displays as "created by you" in fixtures mode,
+        // but it is signed by the fixture key and we hold a different one.
+        // Resealing it would emit a document whose signature does not match
+        // the creator it names, and nothing downstream would catch that.
+        let scratch = Scratch::new("foreignsign");
+        let mut s = seeded();
+        let public = s.attach_identity(scratch.0.to_str().unwrap()).expect("identity");
+        // What fixtures mode does: the displayed creator stays the fixture's,
+        // while the signing key is this node's real one. (`attach_identity`
+        // only skips that overwrite when COLLECT_FIXTURES is set, and the
+        // tests do not run with it.)
+        s.creator_key = "3a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f21".into();
+        assert_ne!(public, s.creator_key(), "the fixture creator is not this key");
+        let out = envelope(&s.update(
+            &update_request("q7k2m3x4w3b5n6tz", "Hijacked", "2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
+            at("2026-10-28T08:00:00Z"),
+        ));
+        assert_eq!(out["ok"], json!(false));
+        assert!(
+            out["error"]["message"].as_str().unwrap().contains("cannot sign for"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn editing_an_unknown_experiment_is_a_bad_request() {
+        let scratch = Scratch::new("editunknown");
+        let mut s = publishing_in(&scratch);
+        let out = envelope(&s.update(
+            &update_request("nope", "x", "2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
+            at("2026-10-28T08:00:00Z"),
+        ));
+        assert_eq!(out["ok"], json!(false));
+        assert_eq!(out["error"]["code"], json!("bad_request"));
+    }
+
+    /// A signing, publishing session holding the fixture experiment, protocol,
+    /// submission and index page, re-authored so this node really is the
+    /// creator — which hiding requires, since it re-signs the index.
+    fn creator_of_the_example(scratch: &Scratch) -> Session {
+        let mut s = seeded();
+        let public = s.attach_identity(scratch.0.to_str().unwrap()).expect("identity");
+        s.attach_store(Box::new(crate::store::MemoryStore::new()));
+        s.creator_key = public.clone();
+        // Re-sign the fixture documents under this node's key, so the chain
+        // this node is about to extend actually verifies.
+        s.experiments[0]["creator"]["key"] = json!(public);
+        let resigned = s.signed(&s.experiments[0].clone()).expect("sign");
+        s.experiments[0] = resigned;
+        s
+    }
+
+    /// The submitter in the fixture submission.
+    fn example_submitter(s: &Session) -> String {
+        s.submissions[0]["submitter"]["key"].as_str().unwrap().to_string()
+    }
+
+    /// The fixture index page already hides one key, so a test about hiding a
+    /// second one has to say which it means.
+    const FIXTURE_HIDDEN: &str = "9b104c2d9b104c2d9b104c2d9b104c2d9b104c2d9b104c2d9b104c2d9b104c2d";
+
+    /// The fixture index page is page 2.
+    const FIXTURE_PAGE: &str = "q7k2m3x4w3b5n6tz#index2";
+
+    #[test]
+    fn hiding_a_submitter_drops_their_rows_from_the_results() {
+        let scratch = Scratch::new("hide");
+        let mut s = creator_of_the_example(&scratch);
+        let submitter = example_submitter(&s);
+        let before = data(&s.results(&results_request()));
+        assert!(before["rows"].as_array().unwrap().len() > 0, "{before}");
+
+        let out = data(&s.set_hidden(
+            &json!({ "experimentId": "q7k2m3x4w3b5n6tz", "submitter": submitter })
+                .to_string(),
+            true,
+            at("2026-10-28T08:00:00Z"),
+        ));
+        assert_eq!(out["changed"], json!(true), "{out}");
+        // Added to whoever the fixture page already hid, not replacing them.
+        let hidden = out["hidden"].as_array().unwrap();
+        assert!(hidden.contains(&json!(submitter)), "{out}");
+        assert!(hidden.contains(&json!(FIXTURE_HIDDEN)), "{out}");
+
+        let after = data(&s.results(&results_request()));
+        assert_eq!(after["rows"], json!([]));
+        assert_eq!(after["summary"]["hidden"], json!(2));
+        assert_eq!(after["summary"]["shown"], json!(0));
+    }
+
+    #[test]
+    fn showing_a_hidden_submitter_puts_their_rows_back() {
+        // The reason `indexer::hidden_keys` takes the newest page rather than
+        // the union of every page: with a union, this is impossible.
+        let scratch = Scratch::new("show");
+        let mut s = creator_of_the_example(&scratch);
+        let submitter = example_submitter(&s);
+        let request = json!({ "experimentId": "q7k2m3x4w3b5n6tz", "submitter": submitter }).to_string();
+        let now = at("2026-10-28T08:00:00Z");
+
+        data(&s.set_hidden(&request, true, now));
+        assert_eq!(data(&s.results(&results_request()))["rows"], json!([]));
+
+        let out = data(&s.set_hidden(&request, false, now));
+        assert_eq!(out["changed"], json!(true), "{out}");
+        // Back to only the key the fixture page hid.
+        assert_eq!(out["hidden"], json!([FIXTURE_HIDDEN]));
+        assert!(data(&s.results(&results_request()))["rows"].as_array().unwrap().len() > 0);
+    }
+
+    #[test]
+    fn hiding_publishes_a_new_signed_index_page_and_points_the_manifest_at_it() {
+        // Hiding is a published act: the index page is signed and uploaded so
+        // the submitter can see it, and the manifest names the new page or a
+        // reader would keep fetching the old one.
+        let scratch = Scratch::new("hidepub");
+        let mut s = creator_of_the_example(&scratch);
+        let submitter = example_submitter(&s);
+        let out = data(&s.set_hidden(
+            &json!({ "experimentId": "q7k2m3x4w3b5n6tz", "submitter": submitter }).to_string(),
+            true,
+            at("2026-10-28T08:00:00Z"),
+        ));
+        assert_eq!(out["published"], json!(true), "{out}");
+
+        let page_cid = s
+            .publication(FIXTURE_PAGE)
+            .and_then(|p| p.cid())
+            .expect("the index page was published")
+            .to_string();
+        let manifest = &data(&s.get(&json!({ "experimentId": "q7k2m3x4w3b5n6tz" }).to_string()))["experiment"];
+        assert_eq!(manifest["index"], json!(page_cid));
+
+        // Both documents verify under this node's key.
+        let mut key = [0u8; 32];
+        hex::decode_to_slice(s.creator_key(), &mut key).unwrap();
+        assert!(crate::sign::verify_with(manifest, &key).is_ok(), "{manifest}");
+        let page = s
+            .index_pages
+            .iter()
+            .find(|p| p.get("page").and_then(Value::as_u64) == Some(2))
+            .unwrap();
+        assert!(crate::sign::verify_with(page, &key).is_ok(), "{page}");
+    }
+
+    #[test]
+    fn hiding_someone_already_hidden_changes_nothing() {
+        let scratch = Scratch::new("hidetwice");
+        let mut s = creator_of_the_example(&scratch);
+        let submitter = example_submitter(&s);
+        let request = json!({ "experimentId": "q7k2m3x4w3b5n6tz", "submitter": submitter }).to_string();
+        let now = at("2026-10-28T08:00:00Z");
+        data(&s.set_hidden(&request, true, now));
+        let again = data(&s.set_hidden(&request, true, now));
+        assert_eq!(again["changed"], json!(false));
+        // No identical page republished at a new address.
+        assert_eq!(again["published"], json!(false));
+    }
+
+    #[test]
+    fn only_the_creator_can_hide_a_submitter() {
+        let mut s = seeded();
+        s.creator_key = "bb".repeat(32);
+        let out = envelope(&s.set_hidden(
+            &json!({ "experimentId": "q7k2m3x4w3b5n6tz", "submitter": "cc".repeat(32) }).to_string(),
+            true,
+            at("2026-10-28T08:00:00Z"),
+        ));
+        assert_eq!(out["ok"], json!(false));
+        assert_eq!(out["error"]["code"], json!("not_yours"));
+    }
+
+    #[test]
+    fn a_creator_cannot_hide_themselves() {
+        let scratch = Scratch::new("hideself");
+        let mut s = creator_of_the_example(&scratch);
+        let me = s.creator_key().to_string();
+        let out = envelope(&s.set_hidden(
+            &json!({ "experimentId": "q7k2m3x4w3b5n6tz", "submitter": me }).to_string(),
+            true,
+            at("2026-10-28T08:00:00Z"),
+        ));
+        assert_eq!(out["ok"], json!(false));
+        assert_eq!(out["error"]["code"], json!("bad_request"));
+    }
+
+    #[test]
+    fn a_submitter_that_is_not_a_key_is_refused() {
+        // Upper-case hex is a different string to every comparison we make,
+        // so accepting it would let a hidden submitter return by changing
+        // case.
+        let scratch = Scratch::new("hidebadkey");
+        let mut s = creator_of_the_example(&scratch);
+        for bad in ["", "nope", &"AB".repeat(32), &"ab".repeat(31)] {
+            let out = envelope(&s.set_hidden(
+                &json!({ "experimentId": "q7k2m3x4w3b5n6tz", "submitter": bad }).to_string(),
+                true,
+                at("2026-10-28T08:00:00Z"),
+            ));
+            assert_eq!(out["ok"], json!(false), "{bad} should be refused");
+        }
+    }
+
+    #[test]
+    fn exporting_writes_a_csv_and_reports_where_it_went() {
+        let scratch = Scratch::new("exportcsv");
+        let mut s = creator_of_the_example(&scratch);
+        let out = data(&s.export(&results_request(), at("2026-10-29T08:00:00Z")));
+        assert_eq!(out["format"], json!("csv"));
+        assert_eq!(out["mime"], json!("text/csv"));
+        assert_eq!(
+            out["filename"],
+            json!("collect-q7k2m3x4w3b5n6tz-wildlife-sighting-20261029.csv")
+        );
+
+        let path = out["path"].as_str().unwrap();
+        let written = std::fs::read_to_string(path).expect("the file is there");
+        assert_eq!(written.len(), out["bytes"].as_u64().unwrap() as usize);
+        // The preview is the same bytes, not a second rendering of them.
+        assert_eq!(out["text"], json!(written));
+        assert!(written.starts_with("Document CID,Submitter key"), "{written}");
+        assert_eq!(out["rows"].as_u64().unwrap() as usize, written.lines().count() - 1);
+    }
+
+    #[test]
+    fn an_export_never_contains_a_hidden_submitter() {
+        // The reason export is built on `results` rather than reading the
+        // submissions again: this is the failure nobody would notice.
+        let scratch = Scratch::new("exporthidden");
+        let mut s = creator_of_the_example(&scratch);
+        let submitter = example_submitter(&s);
+        let now = at("2026-10-29T08:00:00Z");
+
+        let before = data(&s.export(&results_request(), now));
+        assert!(
+            std::fs::read_to_string(before["path"].as_str().unwrap())
+                .unwrap()
+                .contains(&submitter),
+            "the submitter should be there to start with"
+        );
+
+        data(&s.set_hidden(
+            &json!({ "experimentId": "q7k2m3x4w3b5n6tz", "submitter": submitter }).to_string(),
+            true,
+            now,
+        ));
+        let after = data(&s.export(&results_request(), now));
+        let text = std::fs::read_to_string(after["path"].as_str().unwrap()).unwrap();
+        assert!(!text.contains(&submitter), "{text}");
+        assert_eq!(after["rows"], json!(0));
+    }
+
+    #[test]
+    fn exporting_json_round_trips_through_serde() {
+        let scratch = Scratch::new("exportjson");
+        let mut s = creator_of_the_example(&scratch);
+        let mut request: Value = serde_json::from_str(&results_request()).unwrap();
+        request["format"] = json!("json");
+        let out = data(&s.export(&request.to_string(), at("2026-10-29T08:00:00Z")));
+        assert_eq!(out["format"], json!("json"));
+        let text = std::fs::read_to_string(out["path"].as_str().unwrap()).unwrap();
+        let back: Value = serde_json::from_str(&text).expect("valid JSON");
+        assert_eq!(back["format"], json!("collect/export@1"));
+        assert_eq!(back["protocol"]["id"], json!("wildlife-sighting"));
+    }
+
+    #[test]
+    fn an_unknown_format_is_refused_before_anything_is_written() {
+        let scratch = Scratch::new("exportbadfmt");
+        let mut s = creator_of_the_example(&scratch);
+        let mut request: Value = serde_json::from_str(&results_request()).unwrap();
+        request["format"] = json!("xlsx");
+        let out = envelope(&s.export(&request.to_string(), at("2026-10-29T08:00:00Z")));
+        assert_eq!(out["ok"], json!(false));
+        assert_eq!(out["error"]["code"], json!("bad_request"));
+    }
+
+    #[test]
+    fn an_export_of_an_unknown_protocol_passes_the_tables_own_reason_through() {
+        let scratch = Scratch::new("exportnoproto");
+        let mut s = creator_of_the_example(&scratch);
+        let out = envelope(&s.export(
+            &json!({ "experimentId": "q7k2m3x4w3b5n6tz", "protocolId": "nope" }).to_string(),
+            at("2026-10-29T08:00:00Z"),
+        ));
+        assert_eq!(out["ok"], json!(false));
+        assert_eq!(out["error"]["code"], json!("bad_request"));
+        assert!(out["error"]["message"].as_str().unwrap().contains("nope"), "{out}");
+    }
+
+    #[test]
+    fn exporting_with_media_fetches_the_photos_beside_the_csv() {
+        let scratch = Scratch::new("exportmedia");
+        let store = std::sync::Arc::new(crate::store::MemoryStore::new());
+        let mut s = seeded();
+        let public = s.attach_identity(scratch.0.to_str().unwrap()).expect("identity");
+        s.attach_store(Box::new(SharedStore(store.clone())));
+        s.creator_key = public;
+
+        // Put a photo on the submission and the bytes in the store, so the
+        // fetch has something real to find.
+        let cid = store.put("photo.jpg", b"not really a jpeg").unwrap();
+        let document_cid = crate::store::as_document_cid(&cid).unwrap();
+        s.submissions[0]["values"]["photos"] = json!([{
+            "cid": document_cid,
+            "sha256": "ab".repeat(32),
+            "mime": "image/jpeg",
+            "bytes": 17
+        }]);
+
+        let mut request: Value = serde_json::from_str(&results_request()).unwrap();
+        request["includeMedia"] = json!(true);
+        let out = data(&s.export(&request.to_string(), at("2026-10-29T08:00:00Z")));
+        let media = &out["media"];
+        assert_eq!(media["requested"], json!(true), "{out}");
+        assert_eq!(media["wanted"], json!(1), "{out}");
+        assert_eq!(media["written"], json!(1), "{out}");
+        assert_eq!(media["failed"], json!([]));
+
+        // The CSV sits in its own folder with the photos next to it.
+        let path = std::path::Path::new(out["path"].as_str().unwrap());
+        let photo = path
+            .parent()
+            .unwrap()
+            .join("media")
+            .join(format!("{}.bin", crate::store::bare_cid(&document_cid)));
+        assert_eq!(std::fs::read(&photo).unwrap(), b"not really a jpeg");
+        // And the row names the same CID, so file and row match.
+        assert!(std::fs::read_to_string(path).unwrap().contains(&document_cid));
+    }
+
+    #[test]
+    fn a_photo_that_cannot_be_fetched_is_reported_without_losing_the_export() {
+        // The table is the data; the photos are attachments to it.
+        let scratch = Scratch::new("exportmediafail");
+        let mut s = creator_of_the_example(&scratch);
+        s.submissions[0]["values"]["photos"] = json!([{
+            "cid": "logos:zMissing",
+            "sha256": "ab".repeat(32),
+            "mime": "image/jpeg",
+            "bytes": 1
+        }]);
+        let mut request: Value = serde_json::from_str(&results_request()).unwrap();
+        request["includeMedia"] = json!(true);
+        let out = data(&s.export(&request.to_string(), at("2026-10-29T08:00:00Z")));
+        assert_eq!(out["media"]["written"], json!(0));
+        assert_eq!(out["media"]["failed"][0]["cid"], json!("logos:zMissing"));
+        // The CSV is still there.
+        assert!(std::fs::metadata(out["path"].as_str().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn a_protocol_reference_is_not_mistaken_for_a_photo() {
+        // Manifest protocol entries carry a `cid` too; only a media entry has
+        // the hash of the bytes beside it.
+        let mut cids = Vec::new();
+        collect_media_cids(&json!({ "id": "wildlife", "version": 2, "cid": "logos:zForm" }), &mut cids);
+        assert_eq!(cids, Vec::<String>::new());
+
+        collect_media_cids(
+            &json!([{ "cid": "logos:zPic", "sha256": "ab", "mime": "image/jpeg", "bytes": 1 }]),
+            &mut cids,
+        );
+        assert_eq!(cids, vec!["logos:zPic".to_string()]);
+    }
+
+    #[test]
+    fn exporting_before_the_context_is_ready_says_so_rather_than_writing_nowhere() {
+        let mut s = seeded();
+        let out = envelope(&s.export(&results_request(), at("2026-10-29T08:00:00Z")));
+        assert_eq!(out["ok"], json!(false));
+        assert_eq!(out["error"]["code"], json!("not_wired"));
     }
 
     /// A store two owners can look at: the session takes a `Box`, and a test
@@ -1525,6 +2624,7 @@ mod tests {
             identity: None,
             store: None,
             publications: BTreeMap::new(),
+            state_dir: None,
         };
         let out = envelope(&s.create(
             &create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
@@ -1546,6 +2646,7 @@ mod tests {
             identity: None,
             store: None,
             publications: BTreeMap::new(),
+            state_dir: None,
         }
     }
 
@@ -1654,6 +2755,7 @@ mod tests {
             identity: None,
             store: None,
             publications: BTreeMap::new(),
+            state_dir: None,
         };
         let out = data(&s.list(at("2026-10-28T08:00:00Z")));
         let cards = out["experiments"].as_array().unwrap();

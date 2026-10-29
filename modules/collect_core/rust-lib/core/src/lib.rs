@@ -13,6 +13,7 @@
 
 pub mod api;
 pub mod canonical;
+pub mod export;
 pub mod fields;
 pub mod geo;
 pub mod identity;

@@ -39,6 +39,14 @@ pub fn is_experiment_id(s: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b))
 }
 
+/// Does `s` look like an Ed25519 public key? Mirrors the schema's pattern:
+/// 64 lower-case hex characters. Lower-case specifically — the same key in
+/// upper case is a different string to every comparison we make on it, so
+/// accepting it would let a hidden submitter come back by changing case.
+pub fn is_key(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 /// Does `s` look like a protocol id? Mirrors the schema's pattern:
 /// lower-case alphanumeric groups joined by single hyphens, up to 64 chars.
 pub fn is_protocol_id(s: &str) -> bool {

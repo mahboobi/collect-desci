@@ -110,6 +110,20 @@ pub trait CollectCoreModule: Send + 'static {
     /// `storage_timeout` or `storage_rejected`.
     fn experiments_publish(&mut self, request: String) -> String;
 
+    /// Edit an experiment's details. Publishes a new signed version.
+    fn experiments_update(&mut self, request: String) -> String;
+
+    /// Drop a submitter's rows from the index. Not deletion — the documents
+    /// are published and cannot be recalled.
+    fn submitters_hide(&mut self, request: String) -> String;
+
+    /// Put a hidden submitter's rows back.
+    fn submitters_show(&mut self, request: String) -> String;
+
+    /// Write the results table out as a CSV or JSON file, optionally with the
+    /// photos beside it. Returns the path: the QML side cannot write files.
+    fn results_export(&mut self, request: String) -> String;
+
     /// Call any method by its SPEC section 6 name, e.g. `submissions.validate`.
     /// Lets the UI hold one call site, and lets `logoscore call` reach a method
     /// this trait has not named yet.
@@ -276,6 +290,26 @@ impl CollectCoreModule for Collect {
         self.session().publish_now(&request)
     }
 
+    fn experiments_update(&mut self, request: String) -> String {
+        let now = chrono::Utc::now();
+        self.session().update(&request, now)
+    }
+
+    fn submitters_hide(&mut self, request: String) -> String {
+        let now = chrono::Utc::now();
+        self.session().set_hidden(&request, true, now)
+    }
+
+    fn submitters_show(&mut self, request: String) -> String {
+        let now = chrono::Utc::now();
+        self.session().set_hidden(&request, false, now)
+    }
+
+    fn results_export(&mut self, request: String) -> String {
+        let now = chrono::Utc::now();
+        self.session().export(&request, now)
+    }
+
     fn call(&mut self, method: String, request: String) -> String {
         // The stateful methods live on Session, which api::dispatch cannot
         // reach — it only knows the pure functions. Routing them here is what
@@ -290,6 +324,10 @@ impl CollectCoreModule for Collect {
             "protocols.saveDraft" => self.session().save_protocol(&request, now),
             "results.list" => self.session().results(&request),
             "experiments.publish" => self.session().publish_now(&request),
+            "experiments.update" => self.session().update(&request, now),
+            "submitters.hide" => self.session().set_hidden(&request, true, now),
+            "submitters.show" => self.session().set_hidden(&request, false, now),
+            "results.export" => self.session().export(&request, now),
             _ => api::dispatch(&method, &request),
         }
     }

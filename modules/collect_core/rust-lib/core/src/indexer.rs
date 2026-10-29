@@ -134,18 +134,8 @@ impl IndexState {
     /// pages on Storage rather than from memory.
     pub fn from_pages(pages: &[Value]) -> Self {
         let mut state = IndexState::default();
+        state.hidden_keys = hidden_keys(pages);
         for page in pages {
-            for key in page
-                .get("hidden_keys")
-                .and_then(Value::as_array)
-                .unwrap_or(&Vec::new())
-            {
-                if let Some(k) = key.as_str()
-                    && !state.hidden_keys.iter().any(|h| h == k)
-                {
-                    state.hidden_keys.push(k.to_string());
-                }
-            }
             for entry in page
                 .get("entries")
                 .and_then(Value::as_array)
@@ -347,6 +337,31 @@ impl Entry {
 
 /// Lay accepted entries out across index pages.
 ///
+/// Who the creator currently hides, according to `pages`.
+///
+/// The **newest page wins**, rather than the union of every page. The union
+/// looks safer and is wrong: un-hiding someone would leave their key in an
+/// older page forever, so `show` could never undo `hide`. The newest page is
+/// the current state of the index by the same logic that makes it the current
+/// entry list.
+///
+/// Chosen by the `page` number, not by position, because the two callers hold
+/// their pages in opposite orders and an ordering convention is exactly the
+/// kind of thing that silently stops being true.
+pub fn hidden_keys(pages: &[Value]) -> Vec<String> {
+    pages
+        .iter()
+        .max_by_key(|p| p.get("page").and_then(Value::as_u64).unwrap_or(0))
+        .and_then(|p| p.get("hidden_keys").and_then(Value::as_array))
+        .map(|keys| {
+            keys.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// `existing` is the newest page, if there is one; entries fill it to
 /// `PAGE_CAPACITY` before a new page opens. Returns the pages to upload,
 /// oldest first, each linked to its predecessor by `prev`.

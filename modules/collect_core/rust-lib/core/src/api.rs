@@ -54,6 +54,10 @@ pub mod code {
     pub const UNKNOWN_METHOD: &str = "unknown_method";
     /// The call is understood but its transport is not built yet.
     pub const NOT_WIRED: &str = "not_wired";
+    /// The caller is not the creator of the thing it is trying to change.
+    /// Local only: it stops this node editing a document it cannot sign for,
+    /// and is not a security boundary — the signature is.
+    pub const NOT_YOURS: &str = "not_yours";
 }
 
 /// The success envelope, for callers outside this module (notably `session`).
