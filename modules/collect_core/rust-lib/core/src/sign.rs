@@ -21,6 +21,15 @@ pub enum Error {
     MalformedSignature,
     #[error("`{field}` is not a hex string of {PUBLIC_KEY_LEN} bytes")]
     MalformedKey { field: &'static str },
+    /// Correct hex, correct length, and still not a key.
+    ///
+    /// Distinct from `MalformedKey` because the two send a reader in opposite
+    /// directions. The embedded fixture's `3a9d0f21…` is perfectly good hex,
+    /// so reporting it as "not a hex string of 32 bytes" is both wrong and
+    /// unactionable — what is wrong with it is that it is not a point on the
+    /// curve, and no amount of looking at the string shows that.
+    #[error("`{field}` is not a usable Ed25519 public key (valid hex, but not a point on the curve)")]
+    UnusableKey { field: &'static str },
     #[error("document does not carry its author's key; pass one explicitly")]
     NoAuthorKey,
     #[error("signature does not verify against key {key}")]
@@ -63,7 +72,7 @@ pub fn verify_with(doc: &Value, public_key: &[u8; PUBLIC_KEY_LEN]) -> Result<(),
         .ok_or(Error::MissingSignature)?;
     let sig_bytes: [u8; SIGNATURE_LEN] = hex_exact(sig_hex).ok_or(Error::MalformedSignature)?;
 
-    let verifying = VerifyingKey::from_bytes(public_key).map_err(|_| Error::MalformedKey {
+    let verifying = VerifyingKey::from_bytes(public_key).map_err(|_| Error::UnusableKey {
         field: "public key",
     })?;
     let payload = signing_payload(doc)?;
@@ -86,6 +95,7 @@ pub fn verify(doc: &Value) -> Result<[u8; PUBLIC_KEY_LEN], Error> {
     verify_with(doc, &key).map_err(|e| match e {
         // Surface which member held the unusable key.
         Error::MalformedKey { .. } => Error::MalformedKey { field },
+        Error::UnusableKey { .. } => Error::UnusableKey { field },
         other => other,
     })?;
     Ok(key)
@@ -126,6 +136,24 @@ fn hex_exact<const N: usize>(s: &str) -> Option<[u8; N]> {
 
 #[cfg(test)]
 mod tests {
+    /// Valid hex of the right length that is not a point on the curve. The
+    /// embedded fixture's creator key is exactly this shape.
+    #[test]
+    fn hex_that_is_not_a_curve_point_says_so() {
+        use serde_json::json;
+        let doc = json!({
+            "schema": "collect/experiment@1",
+            "creator": { "key": "3a9d0f21".repeat(8) },
+            "sig": "00".repeat(64),
+        });
+        let error = super::verify(&doc).expect_err("should not verify");
+        let text = error.to_string();
+        // Not "is not a hex string": it is one, and saying otherwise sends
+        // the reader to look at the string instead of at the key.
+        assert!(text.contains("not a usable Ed25519 public key"), "{text}");
+        assert!(text.contains("creator.key"), "{text}");
+    }
+
     use super::*;
     use serde_json::json;
 

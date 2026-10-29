@@ -340,11 +340,51 @@ impl Session {
             .map_err(|e| e.to_string())?;
         let public = identity.public_hex();
         self.state_dir = Some(Path::new(persistence_path).to_path_buf());
-        if !api::fixtures_enabled() {
-            self.creator_key = public.clone();
-        }
         self.identity = Some(identity);
+        self.creator_key = public.clone();
+        if api::fixtures_enabled() {
+            self.reauthor_fixtures();
+        }
         Ok(public)
+    }
+
+    /// Re-sign the seeded example under this node's key.
+    ///
+    /// Fixtures mode used to keep the example's own creator key so it read as
+    /// "created by you" on the dashboard. It read that way and was not: the
+    /// example is signed by `3a9d0f21…`, a key nobody holds — and which is
+    /// not even a point on the curve — so every creator action on it failed
+    /// at the signature. Adding a form to the example reported
+    ///
+    ///   this node cannot sign for `3a9d0f21…`
+    ///
+    /// which is accurate and useless, because there was nothing the person
+    /// could do about it.
+    ///
+    /// So the example becomes genuinely ours instead of nominally ours. The
+    /// submissions are left alone: they are other people's, and re-signing
+    /// them would turn every contributor into this node.
+    fn reauthor_fixtures(&mut self) {
+        let key = self.creator_key.clone();
+        for i in 0..self.experiments.len() {
+            self.experiments[i]["creator"]["key"] = json!(key);
+            if let Ok(signed) = self.signed(&self.experiments[i].clone()) {
+                self.experiments[i] = signed;
+            }
+        }
+        // Protocols and index pages carry no author key of their own — they
+        // are checked against the manifest's creator — so they only need the
+        // new signature.
+        for i in 0..self.protocols.len() {
+            if let Ok(signed) = self.signed(&self.protocols[i].clone()) {
+                self.protocols[i] = signed;
+            }
+        }
+        for i in 0..self.index_pages.len() {
+            if let Ok(signed) = self.signed(&self.index_pages[i].clone()) {
+                self.index_pages[i] = signed;
+            }
+        }
     }
 
     pub fn can_sign(&self) -> bool {
@@ -3412,6 +3452,55 @@ mod tests {
         fn inbox(&self) -> Vec<Value> {
             self.0.inbox()
         }
+    }
+
+    #[test]
+    fn the_seeded_example_becomes_this_nodes_own() {
+        // It used to read as "created by you" while being signed by a key
+        // nobody holds, so every creator action on it failed at the
+        // signature with nothing the person could do about it.
+        let scratch = Scratch::new("reauthor");
+        let mut s = seeded();
+        let public = s.attach_identity(scratch.0.to_str().unwrap()).expect("identity");
+        s.reauthor_fixtures();
+
+        assert_eq!(s.creator_key(), public);
+        let doc = &s.experiments[0];
+        assert_eq!(doc["creator"]["key"], json!(public));
+        let mut key = [0u8; 32];
+        hex::decode_to_slice(&public, &mut key).unwrap();
+        assert!(crate::sign::verify_with(doc, &key).is_ok(), "{doc}");
+        // And it verifies on its own terms, which is what reseal checks.
+        assert!(crate::sign::verify(doc).is_ok());
+    }
+
+    #[test]
+    fn a_form_can_be_added_to_the_seeded_example() {
+        // The failure this fixes, end to end.
+        let scratch = Scratch::new("reauthorform");
+        let mut s = seeded();
+        s.attach_identity(scratch.0.to_str().unwrap()).expect("identity");
+        s.reauthor_fixtures();
+        s.attach_store(Box::new(crate::store::MemoryStore::new()));
+
+        // The example does not start at version 1, so the check is that the
+        // amendment bumped it rather than what it bumped it to.
+        let before = s.experiments[0]["version"].as_u64().unwrap();
+        let saved = data(&s.save_protocol(&draft_for("q7k2m3x4w3b5n6tz"), at("2026-10-28T08:00:00Z")));
+        assert_eq!(saved["saved"], json!(true), "{saved}");
+        assert_eq!(saved["experiment"]["version"], json!(before + 1));
+    }
+
+    #[test]
+    fn the_examples_contributors_are_not_turned_into_this_node() {
+        // Re-signing the submissions would make every contributor us.
+        let scratch = Scratch::new("reauthorsubs");
+        let mut s = seeded();
+        let before = s.submissions[0]["submitter"]["key"].clone();
+        let public = s.attach_identity(scratch.0.to_str().unwrap()).expect("identity");
+        s.reauthor_fixtures();
+        assert_eq!(s.submissions[0]["submitter"]["key"], before);
+        assert_ne!(s.submissions[0]["submitter"]["key"], json!(public));
     }
 
     /// A store two owners can look at: the session takes a `Box`, and a test
