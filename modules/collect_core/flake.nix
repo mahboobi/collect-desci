@@ -20,30 +20,12 @@
     storage_module.url = "github:logos-co/logos-storage-module";
     delivery_module.url = "github:logos-co/logos-delivery-module";
 
-    # Declared for its side effect: making the host load it.
-    #
-    # Collect never calls this module. `delivery_module` does — it declares
-    # `optional_depends [libp2p_module, liblogos_rln_module]` and bridges RLN
-    # proof generation to it. But `optional_depends` does **not** cause
-    # loading, and a declaration here does, so this is the lever available.
-    # Without it delivery reports
-    #
-    #   RLN backend did not answer the startup membership check; sends and
-    #   proof validation fail until it does
-    #
-    # and every announcement on logos.test is refused. The dependency is real
-    # even though the call path is not: Collect's announcements need RLN.
-    # Pinned to the revision logos-delivery-module itself pins, so the bridge
-    # and the backend cannot disagree.
-    liblogos_rln_module.url =
-      "git+https://github.com/logos-co/logos-rln-modules?dir=logos-rln-module&rev=a814e7feda974a16eaa5dd50667b8fd843177f0e";
 
     # Unify their transitive builder onto our pin, as collect_ui does for
     # collect_core. Without this the lock carries two and the stale one wins
     # under scaffold's --override-input.
     storage_module.inputs.logos-module-builder.follows = "logos-module-builder";
     delivery_module.inputs.logos-module-builder.follows = "logos-module-builder";
-    liblogos_rln_module.inputs.logos-module-builder.follows = "logos-module-builder";
   };
 
   outputs = inputs@{ logos-module-builder, ... }:
