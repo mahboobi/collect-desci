@@ -70,6 +70,22 @@ pub fn envelope_err(code: &str, message: impl AsRef<str>) -> String {
     err(code, message)
 }
 
+/// A failure envelope carrying extra fields on the error.
+///
+/// For failures the UI has to act on differently rather than just display:
+/// `rln_not_ready` travels with the membership state so the screen can
+/// explain what is missing, and a retryable transport error says so instead
+/// of making the UI guess from the code.
+pub fn envelope_err_data(code: &str, message: impl AsRef<str>, extra: Value) -> String {
+    let mut error = json!({ "code": code, "message": message.as_ref() });
+    if let (Some(into), Some(from)) = (error.as_object_mut(), extra.as_object()) {
+        for (k, v) in from {
+            into.insert(k.clone(), v.clone());
+        }
+    }
+    json!({ "ok": false, "error": error }).to_string()
+}
+
 /// The embedded example experiment, for `session`'s fixtures seeding.
 pub fn fixture_experiment() -> &'static str {
     fixture::EXPERIMENT

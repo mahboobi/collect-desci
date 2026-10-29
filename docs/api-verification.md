@@ -657,3 +657,81 @@ The installed `/Applications/LogosBasecamp.app` additionally has
 `-dev` modules (see `tools/load.sh` VARIANTS). So Storage has to be built from
 the flake for the dev variant and installed into the profile like any other
 module.
+
+
+---
+
+## Round 5 — the Delivery contract, 29 October 2026
+
+```
+nix build github:logos-co/logos-delivery-module#lidl
+```
+
+Committed as `docs/delivery_module.lidl` (delivery_module 0.3.3).
+
+**Delivery's events are shaped unlike Storage's, and this is the trap.**
+Storage declares every event as `payload: tstr` — one JSON string to parse.
+Delivery declares typed, positional fields:
+
+```
+event messageReceived(messageHash: tstr, contentTopic: tstr,
+                      payload: bstr, source: tstr, timestamp: int)
+```
+
+So the event data is an argument **list**, read by position, and `payload` is
+`bstr` — bytes, base64 across the FFI boundary, decoded with the SDK's
+`logos_rust_sdk::bytes::decode`. Code that assumed the Storage shape here finds
+null everywhere. Both shapes now have a test naming the mistake they prevent
+(`a_received_message_is_read_positionally_and_its_payload_decoded`).
+
+**Deduplication is mandatory, and the contract says so.** `messageReceived`
+carries `source: "live" | "history"`; Store catch-up (`backfillEnabled`,
+default **true**) replays what was missed while the node was down, and upstream
+suppresses duplicates "only for a few minutes and only in memory". A creator
+that indexed every delivery would re-index its whole backlog after any restart.
+`delivery::Seen` is the guard, bounded, with `indexer::accept`'s duplicate rule
+still behind it.
+
+**Q9 is answerable rather than assumed.** `rlnState()` returns
+`{state, message}` plus `registryId`, `rlnIdentifier` and `epochSizeSec`
+**once a preset has enabled RLN** — so the presence of a registry is what says
+RLN applies at all, which is more durable than matching on state names that are
+upstream's to rename. `rlnStateChanged` is the same transition as an event.
+There is also an RLN *bridge* (`rlnBridgeEnable`, `rlnRespond`, and the
+`dispatchRln*RequestEvent` events, with `liblogos_rln_module` as an optional
+dependency), so a module can answer RLN requests on Delivery's behalf. Collect
+does not: it reads the state and reports it.
+
+An unreadable `rlnState` is treated as **required and not ready**. Claiming a
+send will work and having it fail silently is worse than saying we cannot tell.
+
+**Sends are not awaited.** `send` returns a request id and completes through
+`messageQueued` / `messagePropagated` / `messageSent` / `messageError`. None of
+those is the confirmation that matters: a submitter re-announces until the
+*creator* sends a receipt (SPEC 3.2), so `messageSent` would only report that
+the network took a message whose real acknowledgement is a different message.
+What is checked up front is `rlnState()`, because that is the failure a person
+can act on.
+
+**Node setup.** `createNode(cfg)` then `start()`, completing on
+`nodeStarted(success, message, timestamp)`. The layered config shape is
+`{ "mode": "Edge", "preset": "logos.test" }` — `Edge` because Collect is a
+client and has no business relaying other people's traffic. `anonymityLevel` is
+left at its default: mix routing would change what the spec says about privacy,
+and SPEC 2 forbids adding that in v1 without asking.
+
+### The content topic
+
+`/collect/1/<experiment id>/json` — Waku's four-part shape. One topic per
+experiment, so a creator is not handed every other experiment's traffic. An
+experiment id is already a public, non-guessable 16 characters, so the topic
+leaks nothing a link does not.
+
+### Inbound messages do not call into the session
+
+Delivery hands messages to a listener thread; the session is `&mut`-owned by
+the module. A callback would need the session behind a lock held across the
+whole of `deliver`, which does Storage fetches and publishes inside it. So the
+courier owns a bounded inbox and the session drains it on a timer
+(`delivery.drain`), which keeps every mutation on one thread and makes the
+whole receive path testable without one.

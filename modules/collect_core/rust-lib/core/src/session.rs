@@ -10,6 +10,7 @@
 //! Logos Storage (SPEC Q9/Q12), so `publish` is deliberately absent rather
 //! than faked.
 
+use crate::delivery::{self, Courier};
 use crate::store::{self, DocumentStore};
 use crate::{api, export, fields, identity::Identity, ids, schema};
 use chrono::{DateTime, Utc};
@@ -100,6 +101,16 @@ pub struct Session {
     /// exports are written, because the QML side cannot write files at all
     /// and this is the only place we are promised is writable.
     state_dir: Option<std::path::PathBuf>,
+    /// Logos Delivery, if the host gave us a working client.
+    courier: Option<Box<dyn Courier>>,
+    /// Message hashes already handled, so Store catch-up replaying a
+    /// restart's worth of traffic does not index everything twice.
+    seen: delivery::Seen,
+    /// Receipts we have been sent for our own submissions, by document CID.
+    receipts: BTreeMap<String, Value>,
+    /// The latest `head` each experiment's creator announced, by experiment.
+    /// How a submitter learns there is a newer manifest or index to fetch.
+    heads: BTreeMap<String, Value>,
 }
 
 impl Default for Session {
@@ -123,6 +134,10 @@ impl Session {
             store: None,
             publications: BTreeMap::new(),
             state_dir: None,
+            courier: None,
+            seen: delivery::Seen::default(),
+            receipts: BTreeMap::new(),
+            heads: BTreeMap::new(),
         };
         if api::fixtures_enabled() {
             session.seed_fixtures();
@@ -806,6 +821,649 @@ impl Session {
             .cloned()
             .collect();
         crate::indexer::hidden_keys(&pages)
+    }
+
+    // ---------------------------------------------------------- Delivery
+
+    /// Hand the session a Logos Delivery client.
+    pub fn attach_courier(&mut self, courier: Box<dyn Courier>) {
+        self.courier = Some(courier);
+    }
+
+    pub fn can_announce(&self) -> bool {
+        self.courier.as_ref().map(|c| c.rln().ready).unwrap_or(false)
+    }
+
+    pub fn courier_description(&self) -> Option<String> {
+        self.courier.as_ref().map(|c| c.describe())
+    }
+
+    /// What RLN membership this node has, if Delivery is attached at all.
+    ///
+    /// Reported rather than assumed: on `logos.test` a node needs a funded
+    /// membership before it may publish, and a submitter whose announcement
+    /// cannot go out needs to be told that rather than left watching a
+    /// spinner (SPEC Q9).
+    pub fn rln_status(&self) -> Option<Value> {
+        self.courier.as_ref().map(|c| c.rln().as_json())
+    }
+
+    /// Subscribe to the topics of every experiment this node cares about.
+    ///
+    /// Both roles need this and for the same reason: a creator receives
+    /// submission announcements, a submitter receives the receipts and heads
+    /// for experiments it has joined. Returns the topics now watched.
+    pub fn watch_topics(&mut self) -> Vec<String> {
+        let Some(courier) = self.courier.as_deref() else {
+            return Vec::new();
+        };
+        let mut watched = Vec::new();
+        for experiment in &self.experiments {
+            let Some(id) = experiment.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let topic = delivery::topic(id);
+            match courier.subscribe(&topic) {
+                Ok(()) => watched.push(topic),
+                // Logged, not fatal: one unsubscribable experiment should not
+                // stop the others being watched.
+                Err(e) => eprintln!("collect_core: cannot watch {topic}: {e}"),
+            }
+        }
+        watched
+    }
+
+    /// Sign and send one announcement.
+    ///
+    /// `Ok` is Delivery's request id; `Err` is a ready-made failure envelope,
+    /// so each caller can return it unchanged rather than restating a reason
+    /// that four code paths would otherwise word four ways.
+    fn announce(
+        &mut self,
+        experiment_id: &str,
+        announcement: &Value,
+        kind: schema::Kind,
+    ) -> Result<String, String> {
+        let signed = match self.signed(announcement) {
+            Ok(s) => s,
+            Err(e) => return Err(api::envelope_err(api::code::NOT_WIRED, e)),
+        };
+        let errors = schema::errors_as(&signed, kind);
+        if !errors.is_empty() {
+            return Err(api::envelope_err(
+                api::code::INVALID_DOCUMENT,
+                format!("the announcement does not validate: {}", errors.join("; ")),
+            ));
+        }
+        let Some(courier) = self.courier.as_deref() else {
+            return Err(api::envelope_err(
+                api::code::NOT_WIRED,
+                "no Logos Delivery is attached to this build",
+            ));
+        };
+        // Canonical bytes, so the signature a receiver checks covers exactly
+        // what went over the wire.
+        let bytes = match crate::canonical::to_bytes(&signed) {
+            Ok(b) => b,
+            Err(e) => {
+                return Err(api::envelope_err(
+                    api::code::INVALID_DOCUMENT,
+                    format!("the announcement is not canonicalizable: {e}"),
+                ))
+            }
+        };
+        match courier.send(&delivery::topic(experiment_id), &bytes) {
+            Ok(request_id) => Ok(request_id),
+            Err(e) => Err(api::envelope_err_data(
+                e.code(),
+                e.to_string(),
+                json!({ "retryable": e.retryable(), "rln": courier.rln().as_json() }),
+            )),
+        }
+    }
+
+    /// `delivery.head` — the creator saying where the current documents are.
+    ///
+    /// Re-sent on a timer by the UI (SPEC 3.3: every 10 minutes), because
+    /// Delivery's Store is temporary and a submitter who joins later has no
+    /// other way to find the newest index.
+    pub fn publish_head(&mut self, raw: &str, now: DateTime<Utc>) -> String {
+        let request: Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
+        };
+        let Some(wanted) = request.get("experimentId").and_then(Value::as_str) else {
+            return api::envelope_err(api::code::BAD_REQUEST, "`experimentId` is required");
+        };
+        let wanted = wanted.to_string();
+        let Some(experiment) = self
+            .experiments
+            .iter()
+            .find(|e| e.get("id").and_then(Value::as_str) == Some(wanted.as_str()))
+            .cloned()
+        else {
+            return api::envelope_err(
+                api::code::BAD_REQUEST,
+                format!("no experiment `{wanted}` on this node"),
+            );
+        };
+        if experiment.pointer("/creator/key").and_then(Value::as_str) != Some(&self.creator_key) {
+            return api::envelope_err(
+                api::code::NOT_YOURS,
+                "only the creator of an experiment announces its head",
+            );
+        }
+        // A head names the manifest's CID, so there is nothing to announce
+        // until the manifest has one. Saying that is more useful than sending
+        // a head pointing at `logos:pending`.
+        let Some(manifest_cid) = self.cid_of(&wanted).map(str::to_string) else {
+            return api::envelope_err(
+                api::code::NOT_WIRED,
+                "the manifest has no CID yet: publish it to Logos Storage first",
+            );
+        };
+
+        let (index_cid, index_page) = self.newest_index(&wanted);
+        let announcement = delivery::head(
+            &wanted,
+            &self.creator_key.clone(),
+            &manifest_cid,
+            experiment.get("version").and_then(Value::as_u64).unwrap_or(1),
+            index_cid.as_deref(),
+            index_page,
+            &now.to_rfc3339(),
+        );
+        match self.announce(&wanted, &announcement, schema::Kind::HeadAnnouncement) {
+            Ok(request_id) => api::envelope_ok(json!({
+                "announced": true,
+                "request_id": request_id,
+                "topic": delivery::topic(&wanted),
+                "head": announcement,
+            })),
+            Err(e) => e,
+        }
+    }
+
+    /// The newest index page's CID and number, or `(None, 0)` when this
+    /// experiment has received nothing yet.
+    fn newest_index(&self, experiment_id: &str) -> (Option<String>, u64) {
+        let Some(page) = self
+            .index_pages
+            .iter()
+            .filter(|p| p.get("experiment").and_then(Value::as_str) == Some(experiment_id))
+            .max_by_key(|p| p.get("page").and_then(Value::as_u64).unwrap_or(0))
+        else {
+            return (None, 0);
+        };
+        let number = page.get("page").and_then(Value::as_u64).unwrap_or(0);
+        let key = self.page_key(experiment_id, number);
+        (self.cid_of(&key).map(str::to_string), number)
+    }
+
+    /// `delivery.announceSubmission` — a submitter saying a submission exists.
+    ///
+    /// The last step of SPEC 3.2 step 3, after the submission document is on
+    /// Storage: the CID is the whole message, so this cannot be sent before
+    /// the upload has one.
+    pub fn announce_submission(&mut self, raw: &str, now: DateTime<Utc>) -> String {
+        let request: Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
+        };
+        let text = |k: &str| request.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let experiment_id = text("experimentId");
+        let cid = text("cid");
+        let protocol = text("protocolId");
+        let version = request.get("version").and_then(Value::as_u64).unwrap_or(0);
+        for (name, value) in [("experimentId", &experiment_id), ("cid", &cid), ("protocolId", &protocol)] {
+            if value.is_empty() {
+                return api::envelope_err(api::code::BAD_REQUEST, format!("`{name}` is required"));
+            }
+        }
+        if version == 0 {
+            return api::envelope_err(api::code::BAD_REQUEST, "`version` is required");
+        }
+
+        let announcement = delivery::submission(
+            &experiment_id,
+            &self.creator_key.clone(),
+            &cid,
+            &protocol,
+            version,
+            &now.to_rfc3339(),
+        );
+        match self.announce(&experiment_id, &announcement, schema::Kind::SubmissionAnnouncement) {
+            Ok(request_id) => api::envelope_ok(json!({
+                "announced": true,
+                "request_id": request_id,
+                "topic": delivery::topic(&experiment_id),
+                // Whether the creator has confirmed it. SPEC 3.2 step 3 shows
+                // this as "waiting" until a receipt arrives.
+                "receipt": self.receipts.get(&cid).cloned().unwrap_or(Value::Null),
+                "announcement": announcement,
+            })),
+            Err(e) => e,
+        }
+    }
+
+    /// `delivery.drain` — handle everything that has arrived.
+    ///
+    /// Called on a timer by the UI. The one place inbound messages turn into
+    /// indexed submissions, so a creator's node makes progress whether or not
+    /// anyone is looking at the right screen.
+    pub fn drain(&mut self, now: DateTime<Utc>) -> String {
+        let Some(courier) = self.courier.as_deref() else {
+            return api::envelope_err(
+                api::code::NOT_WIRED,
+                "no Logos Delivery is attached to this build",
+            );
+        };
+        let arrived = courier.inbox();
+        let mut results: Vec<Value> = Vec::new();
+        let mut handled = 0usize;
+        for message in arrived {
+            let outcome: Value = match serde_json::from_str(&self.deliver(&message.to_string(), now)) {
+                Ok(v) => v,
+                Err(e) => json!({ "ok": false, "error": { "message": e.to_string() } }),
+            };
+            if outcome["data"]["handled"] == json!(true) {
+                handled += 1;
+            }
+            results.push(outcome["data"].clone());
+        }
+        api::envelope_ok(json!({
+            "received": results.len(),
+            "handled": handled,
+            "results": results,
+        }))
+    }
+
+    /// `delivery.deliver` — one message arrived on a topic we watch.
+    ///
+    /// The whole receive side, for both roles, because which role a message
+    /// concerns is a property of the message and not of the node: a creator
+    /// gets `submission`, a submitter gets `receipt` and `head`, and a node
+    /// can be both at once for different experiments.
+    ///
+    /// Order matters here and is deliberate:
+    ///
+    /// 1. **Deduplicate first**, on `messageHash`. Store catch-up replays
+    ///    everything missed while the node was down, so without this a
+    ///    restart re-indexes the backlog.
+    /// 2. **The topic has to agree with the announcement.** Otherwise a
+    ///    message on one experiment's topic could claim to be about another,
+    ///    and a creator would index a submission for an experiment they do
+    ///    not run.
+    /// 3. **Contract, then signature.** An invalid announcement is never
+    ///    acted on, and the signature is what ties it to the `from` key.
+    pub fn deliver(&mut self, raw: &str, now: DateTime<Utc>) -> String {
+        let request: Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
+        };
+        let hash = request.get("messageHash").and_then(Value::as_str).unwrap_or("");
+        let source = request.get("source").and_then(Value::as_str).unwrap_or("live");
+        let Some(topic) = request.get("topic").and_then(Value::as_str) else {
+            return api::envelope_err(api::code::BAD_REQUEST, "`topic` is required");
+        };
+        let Some(payload) = request.get("payload").and_then(Value::as_str) else {
+            return api::envelope_err(api::code::BAD_REQUEST, "`payload` is required");
+        };
+
+        if !self.seen.accept(hash) {
+            return api::envelope_ok(json!({
+                "handled": false,
+                "reason": "duplicate",
+                "detail": format!("message {hash} was already handled"),
+            }));
+        }
+
+        let Some(from_topic) = delivery::experiment_of(topic) else {
+            return api::envelope_ok(json!({
+                "handled": false,
+                "reason": "not_ours",
+                "detail": format!("`{topic}` is not a Collect topic"),
+            }));
+        };
+        let from_topic = from_topic.to_string();
+
+        let announcement: Value = match serde_json::from_str(payload) {
+            Ok(v) => v,
+            Err(e) => {
+                return api::envelope_ok(json!({
+                    "handled": false,
+                    "reason": "unreadable",
+                    "detail": format!("the payload is not JSON: {e}"),
+                }))
+            }
+        };
+        if announcement.get("experiment").and_then(Value::as_str) != Some(from_topic.as_str()) {
+            return api::envelope_ok(json!({
+                "handled": false,
+                "reason": "wrong_topic",
+                "detail": "the announcement names a different experiment than the topic it arrived on",
+            }));
+        }
+
+        let kind = match announcement.get("kind").and_then(Value::as_str) {
+            Some("head") => schema::Kind::HeadAnnouncement,
+            Some("submission") => schema::Kind::SubmissionAnnouncement,
+            Some("receipt") => schema::Kind::ReceiptAnnouncement,
+            other => {
+                return api::envelope_ok(json!({
+                    "handled": false,
+                    "reason": "unknown_kind",
+                    "detail": format!("`{}` is not an announcement kind", other.unwrap_or("")),
+                }))
+            }
+        };
+        let errors = schema::errors_as(&announcement, kind);
+        if !errors.is_empty() {
+            return api::envelope_ok(json!({
+                "handled": false,
+                "reason": "invalid_document",
+                "detail": errors.join("; "),
+            }));
+        }
+        if let Err(e) = crate::sign::verify(&announcement) {
+            return api::envelope_ok(json!({
+                "handled": false,
+                "reason": "bad_signature",
+                "detail": e.to_string(),
+            }));
+        }
+
+        let _ = source;
+        match kind {
+            schema::Kind::SubmissionAnnouncement => self.receive_submission(&from_topic, &announcement, now),
+            schema::Kind::ReceiptAnnouncement => {
+                let cid = announcement.get("cid").and_then(Value::as_str).unwrap_or("").to_string();
+                self.receipts.insert(cid.clone(), announcement.clone());
+                api::envelope_ok(json!({
+                    "handled": true,
+                    "kind": "receipt",
+                    "cid": cid,
+                    "index_page": announcement.get("index_page").cloned().unwrap_or(Value::Null),
+                }))
+            }
+            schema::Kind::HeadAnnouncement => {
+                // Only the creator's own head counts. Anyone can publish on a
+                // public topic, and a head from a stranger naming a manifest
+                // CID would otherwise send submitters off to fetch it.
+                let expected = self
+                    .experiments
+                    .iter()
+                    .find(|e| e.get("id").and_then(Value::as_str) == Some(from_topic.as_str()))
+                    .and_then(|e| e.pointer("/creator/key").and_then(Value::as_str))
+                    .map(str::to_string);
+                let from = announcement.get("from").and_then(Value::as_str).unwrap_or("");
+                if let Some(creator) = expected {
+                    if creator != from {
+                        return api::envelope_ok(json!({
+                            "handled": false,
+                            "reason": "not_the_creator",
+                            "detail": "a head announcement from someone other than the experiment's creator",
+                        }));
+                    }
+                }
+                self.heads.insert(from_topic.clone(), announcement.clone());
+                api::envelope_ok(json!({
+                    "handled": true,
+                    "kind": "head",
+                    "experiment": from_topic,
+                    "manifest": announcement.get("manifest").cloned().unwrap_or(Value::Null),
+                    "manifest_version": announcement.get("manifest_version").cloned().unwrap_or(Value::Null),
+                    "index": announcement.get("index").cloned().unwrap_or(Value::Null),
+                    "index_page": announcement.get("index_page").cloned().unwrap_or(Value::Null),
+                }))
+            }
+            _ => api::envelope_err(api::code::BAD_REQUEST, "not an announcement"),
+        }
+    }
+
+    /// The creator's side of a submission announcement: fetch, judge, index,
+    /// receipt.
+    ///
+    /// The announcement carries only a CID, so the document has to come off
+    /// Storage before anything can be decided about it — the announcement
+    /// cannot be trusted about the submission's contents, only about where to
+    /// find it.
+    fn receive_submission(
+        &mut self,
+        experiment_id: &str,
+        announcement: &Value,
+        now: DateTime<Utc>,
+    ) -> String {
+        let Some(experiment) = self
+            .experiments
+            .iter()
+            .find(|e| e.get("id").and_then(Value::as_str) == Some(experiment_id))
+            .cloned()
+        else {
+            return api::envelope_ok(json!({
+                "handled": false,
+                "reason": "not_ours",
+                "detail": format!("no experiment `{experiment_id}` on this node"),
+            }));
+        };
+        // Only the creator indexes. A submitter watching the same topic sees
+        // other people's announcements and has nothing to do with them.
+        if experiment.pointer("/creator/key").and_then(Value::as_str) != Some(&self.creator_key) {
+            return api::envelope_ok(json!({
+                "handled": false,
+                "reason": "not_the_creator",
+                "detail": "this node does not index this experiment",
+            }));
+        }
+
+        let cid = announcement.get("cid").and_then(Value::as_str).unwrap_or("").to_string();
+        let protocol_id = announcement.get("protocol").and_then(Value::as_str).unwrap_or("").to_string();
+        let Some(store) = self.store.as_deref() else {
+            return api::envelope_ok(json!({
+                "handled": false,
+                "reason": "storage_unavailable",
+                "detail": "the submission cannot be fetched without Logos Storage",
+                "cid": cid,
+            }));
+        };
+        // `local = false`: this is someone else's document and has to come
+        // over the network.
+        let bytes = match store.get(store::bare_cid(&cid), false) {
+            Ok(b) => b,
+            Err(e) => {
+                return api::envelope_ok(json!({
+                    "handled": false,
+                    "reason": e.code(),
+                    "detail": e.to_string(),
+                    "cid": cid,
+                    "retryable": e.retryable(),
+                }))
+            }
+        };
+        let submission: Value = match serde_json::from_slice(&bytes) {
+            Ok(v) => v,
+            Err(e) => {
+                return api::envelope_ok(json!({
+                    "handled": false,
+                    "reason": "unreadable",
+                    "detail": format!("what is at `{cid}` is not JSON: {e}"),
+                }))
+            }
+        };
+
+        let Some(protocol) = self
+            .protocols
+            .iter()
+            .find(|p| p.get("id").and_then(Value::as_str) == Some(protocol_id.as_str()))
+            .cloned()
+        else {
+            return api::envelope_ok(json!({
+                "handled": false,
+                "reason": "protocol_not_open",
+                "detail": format!("no protocol `{protocol_id}` on this node"),
+            }));
+        };
+
+        // Every accept rule, through the one tested path: contract,
+        // signature, window, repeat and rate limits, hidden keys, fields.
+        let pages: Vec<Value> = self
+            .index_pages
+            .iter()
+            .filter(|p| p.get("experiment").and_then(Value::as_str) == Some(experiment_id))
+            .cloned()
+            .collect();
+        let verdict: Value = match serde_json::from_str(&api::index_accept(
+            &json!({
+                "submission": submission,
+                "protocol": protocol,
+                "experiment": experiment,
+                "pages": pages,
+                "now": now.to_rfc3339(),
+            })
+            .to_string(),
+        )) {
+            Ok(v) => v,
+            Err(e) => {
+                return api::envelope_err(
+                    api::code::INVALID_DOCUMENT,
+                    format!("the accept verdict was not readable: {e}"),
+                )
+            }
+        };
+        if verdict["data"]["accepted"] != json!(true) {
+            return api::envelope_ok(json!({
+                "handled": false,
+                "reason": verdict["data"]["reason"].as_str().unwrap_or("rejected"),
+                "detail": verdict["data"]["detail"].clone(),
+                "cid": cid,
+            }));
+        }
+
+        let entry = crate::indexer::Entry {
+            cid: cid.clone(),
+            protocol: protocol_id.clone(),
+            version: announcement.get("version").and_then(Value::as_u64).unwrap_or(1),
+            submitter: submission
+                .pointer("/submitter/key")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            submitted_at: submission
+                .get("submitted_at")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            received_at: now.to_rfc3339(),
+        };
+        let submitter = entry.submitter.clone();
+        let page = match self.index_entry(experiment_id, entry, now) {
+            Ok(page) => page,
+            Err(e) => return api::envelope_err(api::code::INVALID_DOCUMENT, e),
+        };
+
+        // Keep the document, so the results table and exports can show it.
+        self.submissions.push(submission);
+
+        // And tell the submitter, which is what turns S3's "waiting" into
+        // "received".
+        let receipt = delivery::receipt(
+            experiment_id,
+            &self.creator_key.clone(),
+            &cid,
+            page,
+            &now.to_rfc3339(),
+        );
+        let receipted = self
+            .announce(experiment_id, &receipt, schema::Kind::ReceiptAnnouncement)
+            .is_ok();
+
+        api::envelope_ok(json!({
+            "handled": true,
+            "kind": "submission",
+            "cid": cid,
+            "protocol": protocol_id,
+            "submitter": submitter,
+            "index_page": page,
+            // A receipt that did not go out is not a failed submission: it is
+            // indexed either way, and the submitter re-announces until they
+            // get one (SPEC 3.2).
+            "receipted": receipted,
+        }))
+    }
+
+    /// Add one entry to the index, publishing whatever pages that changes.
+    ///
+    /// Returns the page number the entry landed on, which is what a receipt
+    /// has to name.
+    fn index_entry(
+        &mut self,
+        experiment_id: &str,
+        entry: crate::indexer::Entry,
+        now: DateTime<Utc>,
+    ) -> Result<u64, String> {
+        let hidden = self.hidden_for(experiment_id);
+        let newest = self
+            .index_pages
+            .iter()
+            .filter(|p| p.get("experiment").and_then(Value::as_str) == Some(experiment_id))
+            .max_by_key(|p| p.get("page").and_then(Value::as_u64).unwrap_or(0))
+            .cloned();
+        let newest_cid = newest
+            .as_ref()
+            .and_then(|p| p.get("page").and_then(Value::as_u64))
+            .map(|n| self.page_key(experiment_id, n))
+            .and_then(|key| self.cid_of(&key).map(str::to_string));
+
+        let pages = crate::indexer::page_entries(
+            experiment_id,
+            newest.as_ref(),
+            newest_cid.as_deref(),
+            std::slice::from_ref(&entry),
+            &hidden,
+            now,
+        );
+
+        let mut landed = 0u64;
+        let mut newest_page_cid = None;
+        for page in pages {
+            let page = self.signed(&page)?;
+            let errors = schema::errors_as(&page, schema::Kind::Index);
+            if !errors.is_empty() {
+                return Err(format!(
+                    "the index page does not validate: {}",
+                    errors.join("; ")
+                ));
+            }
+            let number = page.get("page").and_then(Value::as_u64).unwrap_or(1);
+            // Which page the entry is actually on, rather than assuming the
+            // last one: a full page returns unchanged and only its successor
+            // carries the new entry.
+            if page
+                .get("entries")
+                .and_then(Value::as_array)
+                .map(|e| e.iter().any(|v| v.get("cid").and_then(Value::as_str) == Some(entry.cid.as_str())))
+                .unwrap_or(false)
+            {
+                landed = number;
+            }
+            let key = self.page_key(experiment_id, number);
+            self.index_pages.retain(|p| {
+                !(p.get("experiment").and_then(Value::as_str) == Some(experiment_id)
+                    && p.get("page").and_then(Value::as_u64) == Some(number))
+            });
+            self.index_pages.push(page.clone());
+            self.publish_doc("index", &key, &page);
+            if let Some(cid) = self.cid_of(&key) {
+                newest_page_cid = Some(cid.to_string());
+            }
+        }
+
+        if let Some(cid) = newest_page_cid {
+            self.reseal_with(experiment_id, move |doc| {
+                doc["index"] = json!(cid);
+            })?;
+        }
+        Ok(landed)
     }
 
     /// `results.export` — write the results table out as a file.
@@ -1523,6 +2181,10 @@ mod tests {
             store: None,
             publications: BTreeMap::new(),
             state_dir: None,
+            courier: None,
+            seen: delivery::Seen::default(),
+            receipts: BTreeMap::new(),
+            heads: BTreeMap::new(),
         };
         let public = session
             .attach_identity(scratch.0.to_str().unwrap())
@@ -2331,6 +2993,422 @@ mod tests {
         assert_eq!(out["error"]["code"], json!("not_wired"));
     }
 
+    // ------------------------------------------------------- Delivery tests
+
+    /// A creator with Storage and Delivery, one experiment and one open form.
+    /// Returns the session, the experiment id and the handles a test needs to
+    /// look at what was sent.
+    fn creator_with_delivery(
+        scratch: &Scratch,
+    ) -> (
+        Session,
+        String,
+        std::sync::Arc<crate::store::MemoryStore>,
+        std::sync::Arc<crate::delivery::MemoryCourier>,
+    ) {
+        let store = std::sync::Arc::new(crate::store::MemoryStore::new());
+        let courier = std::sync::Arc::new(crate::delivery::MemoryCourier::new());
+        let mut s = empty_in(scratch);
+        s.attach_store(Box::new(SharedStore(store.clone())));
+        s.attach_courier(Box::new(SharedCourier(courier.clone())));
+
+        let now = at("2026-10-28T08:00:00Z");
+        let made = data(&s.create(&create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"), now));
+        let id = made["experiment"]["id"].as_str().unwrap().to_string();
+        data(&s.save_protocol(&draft_for(&id), now));
+        (s, id, store, courier)
+    }
+
+    /// A signed submission from somebody else, on `store`, with its CID.
+    fn a_submission_from_a_stranger(
+        scratch: &Scratch,
+        store: &crate::store::MemoryStore,
+        experiment_id: &str,
+    ) -> (String, String) {
+        let identity = Identity::load_or_create(scratch.0.as_path()).expect("identity");
+        let submission = json!({
+            "schema": "collect/submission@1",
+            "id": "0192f7a4-6b2e-7c1d-9a3f-5e8b2c4d6f10",
+            "experiment": experiment_id,
+            "protocol": { "id": "bird-sighting", "version": 1 },
+            "submitter": { "key": identity.public_hex(), "name": "Nisha" },
+            "submitted_at": "2026-10-25T09:00:00Z",
+            "values": { "count": 3 },
+            "sig": "00".repeat(64),
+        });
+        let signed = identity.sign(&submission).expect("sign");
+        let cid = crate::store::publish(store, "submission", &signed).expect("published");
+        (cid, identity.public_hex())
+    }
+
+    /// The `delivery.deliver` request for an announcement, as the shim builds
+    /// it from a `messageReceived` event.
+    fn arriving(experiment_id: &str, announcement: &Value, hash: &str) -> String {
+        json!({
+            "topic": crate::delivery::topic(experiment_id),
+            "messageHash": hash,
+            "source": "live",
+            "payload": announcement.to_string(),
+        })
+        .to_string()
+    }
+
+    /// Sign an announcement as `identity` would.
+    fn signed_by(dir: &Scratch, announcement: Value) -> Value {
+        Identity::load_or_create(dir.0.as_path())
+            .expect("identity")
+            .sign(&announcement)
+            .expect("sign")
+    }
+
+    #[test]
+    fn a_creator_indexes_an_announced_submission_and_sends_a_receipt() {
+        // The whole of SPEC 3.2 step 3 from the creator's side: the
+        // announcement names a CID, the document comes off Storage, every
+        // accept rule runs, the index page is published, and the submitter is
+        // told.
+        let scratch = Scratch::new("e2ecreator");
+        let submitter_dir = Scratch::new("e2esubmitter");
+        let (mut s, id, store, courier) = creator_with_delivery(&scratch);
+        let (cid, submitter) = a_submission_from_a_stranger(&submitter_dir, &store, &id);
+
+        let announcement = signed_by(
+            &submitter_dir,
+            crate::delivery::submission(&id, &submitter, &cid, "bird-sighting", 1, "2026-10-25T09:00:10Z"),
+        );
+        let out = data(&s.deliver(&arriving(&id, &announcement, "0xaaa"), at("2026-10-25T09:00:20Z")));
+
+        assert_eq!(out["handled"], json!(true), "{out}");
+        assert_eq!(out["cid"], json!(cid));
+        assert_eq!(out["submitter"], json!(submitter));
+        assert_eq!(out["index_page"], json!(1));
+        assert_eq!(out["receipted"], json!(true), "{out}");
+
+        // It is in the results table.
+        let table = data(&s.results(
+            &json!({ "experimentId": id, "protocolId": "bird-sighting" }).to_string(),
+        ));
+        assert_eq!(table["rows"].as_array().unwrap().len(), 1, "{table}");
+        assert_eq!(table["rows"][0]["cid"], json!(cid));
+        assert_eq!(table["rows"][0]["values"]["count"], json!(3));
+
+        // And a receipt naming the same CID went out on the experiment's
+        // topic.
+        let receipt = courier
+            .messages()
+            .into_iter()
+            .find(|m| m["kind"] == json!("receipt"))
+            .expect("a receipt was sent");
+        assert_eq!(receipt["cid"], json!(cid));
+        assert_eq!(receipt["index_page"], json!(1));
+        assert_eq!(courier.topics().last().unwrap(), &crate::delivery::topic(&id));
+    }
+
+    #[test]
+    fn the_same_message_arriving_twice_is_indexed_once() {
+        // Store catch-up replays everything missed while the node was down,
+        // so a restart would otherwise re-index the backlog.
+        let scratch = Scratch::new("dedupe");
+        let submitter_dir = Scratch::new("dedupesub");
+        let (mut s, id, store, _courier) = creator_with_delivery(&scratch);
+        let (cid, submitter) = a_submission_from_a_stranger(&submitter_dir, &store, &id);
+        let announcement = signed_by(
+            &submitter_dir,
+            crate::delivery::submission(&id, &submitter, &cid, "bird-sighting", 1, "2026-10-25T09:00:10Z"),
+        );
+        let arrival = arriving(&id, &announcement, "0xaaa");
+        let now = at("2026-10-25T09:00:20Z");
+
+        assert_eq!(data(&s.deliver(&arrival, now))["handled"], json!(true));
+        let again = data(&s.deliver(&arrival, now));
+        assert_eq!(again["handled"], json!(false));
+        assert_eq!(again["reason"], json!("duplicate"));
+
+        let table = data(&s.results(
+            &json!({ "experimentId": id, "protocolId": "bird-sighting" }).to_string(),
+        ));
+        assert_eq!(table["rows"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_announcement_on_the_wrong_topic_is_not_acted_on() {
+        // Otherwise a message on one experiment's topic could claim to be
+        // about another, and a creator would index a submission for an
+        // experiment they do not run.
+        let scratch = Scratch::new("wrongtopic");
+        let submitter_dir = Scratch::new("wrongtopicsub");
+        let (mut s, id, store, _c) = creator_with_delivery(&scratch);
+        let (cid, submitter) = a_submission_from_a_stranger(&submitter_dir, &store, &id);
+        let announcement = signed_by(
+            &submitter_dir,
+            crate::delivery::submission(&id, &submitter, &cid, "bird-sighting", 1, "2026-10-25T09:00:10Z"),
+        );
+        let arrival = json!({
+            "topic": crate::delivery::topic("zzzzzzzzzzzzzzzz"),
+            "messageHash": "0xbbb",
+            "payload": announcement.to_string(),
+        })
+        .to_string();
+        let out = data(&s.deliver(&arrival, at("2026-10-25T09:00:20Z")));
+        assert_eq!(out["handled"], json!(false));
+        assert_eq!(out["reason"], json!("wrong_topic"));
+    }
+
+    #[test]
+    fn an_unsigned_or_tampered_announcement_is_refused() {
+        let scratch = Scratch::new("badsig");
+        let submitter_dir = Scratch::new("badsigsub");
+        let (mut s, id, store, _c) = creator_with_delivery(&scratch);
+        let (cid, submitter) = a_submission_from_a_stranger(&submitter_dir, &store, &id);
+        let mut announcement = signed_by(
+            &submitter_dir,
+            crate::delivery::submission(&id, &submitter, &cid, "bird-sighting", 1, "2026-10-25T09:00:10Z"),
+        );
+        // Change the CID after signing: the signature no longer covers it.
+        announcement["cid"] = json!("logos:zSomethingElse");
+        let out = data(&s.deliver(&arriving(&id, &announcement, "0xccc"), at("2026-10-25T09:00:20Z")));
+        assert_eq!(out["handled"], json!(false));
+        assert_eq!(out["reason"], json!("bad_signature"));
+    }
+
+    #[test]
+    fn a_submission_whose_document_is_not_on_storage_is_reported_as_retryable() {
+        // The announcement is only a pointer; it cannot be trusted about the
+        // contents, and a CID that cannot be fetched is a transport problem
+        // rather than a bad submitter.
+        let scratch = Scratch::new("nofetch");
+        let submitter_dir = Scratch::new("nofetchsub");
+        let (mut s, id, _store, _c) = creator_with_delivery(&scratch);
+        let submitter = Identity::load_or_create(submitter_dir.0.as_path())
+            .unwrap()
+            .public_hex();
+        let announcement = signed_by(
+            &submitter_dir,
+            crate::delivery::submission(&id, &submitter, "logos:zMissing", "bird-sighting", 1, "2026-10-25T09:00:10Z"),
+        );
+        let out = data(&s.deliver(&arriving(&id, &announcement, "0xddd"), at("2026-10-25T09:00:20Z")));
+        assert_eq!(out["handled"], json!(false));
+        assert_eq!(out["cid"], json!("logos:zMissing"));
+        assert!(out["reason"].as_str().unwrap().starts_with("storage_"), "{out}");
+    }
+
+    #[test]
+    fn a_head_from_someone_other_than_the_creator_is_ignored() {
+        // Anyone can publish on a public topic. A head from a stranger naming
+        // a manifest CID would otherwise send submitters off to fetch it.
+        let scratch = Scratch::new("fakehead");
+        let stranger_dir = Scratch::new("fakeheadstranger");
+        let (mut s, id, _store, _c) = creator_with_delivery(&scratch);
+        let stranger = Identity::load_or_create(stranger_dir.0.as_path())
+            .unwrap()
+            .public_hex();
+        let announcement = signed_by(
+            &stranger_dir,
+            crate::delivery::head(&id, &stranger, "logos:zEvil", 9, None, 0, "2026-10-25T09:00:10Z"),
+        );
+        let out = data(&s.deliver(&arriving(&id, &announcement, "0xeee"), at("2026-10-25T09:00:20Z")));
+        assert_eq!(out["handled"], json!(false));
+        assert_eq!(out["reason"], json!("not_the_creator"));
+    }
+
+    #[test]
+    fn a_creator_announces_a_head_naming_the_manifest_and_index() {
+        let scratch = Scratch::new("head");
+        let (mut s, id, _store, courier) = creator_with_delivery(&scratch);
+        let out = data(&s.publish_head(
+            &json!({ "experimentId": id }).to_string(),
+            at("2026-10-28T09:00:00Z"),
+        ));
+        assert_eq!(out["announced"], json!(true), "{out}");
+        assert_eq!(out["topic"], json!(crate::delivery::topic(&id)));
+
+        let head = courier
+            .messages()
+            .into_iter()
+            .find(|m| m["kind"] == json!("head"))
+            .expect("a head was sent");
+        // The manifest CID it names is the one the manifest is actually at.
+        assert_eq!(head["manifest"], json!(s.publication(&id).unwrap().cid().unwrap()));
+        // Nothing received yet, so there is no index page to name — which is
+        // a state the creator announces rather than withholds.
+        assert_eq!(head["index"], Value::Null);
+        assert_eq!(head["index_page"], json!(0));
+    }
+
+    #[test]
+    fn a_head_is_not_announced_before_the_manifest_has_an_address() {
+        let scratch = Scratch::new("headnocid");
+        let mut s = empty_in(&scratch);
+        s.attach_courier(Box::new(crate::delivery::MemoryCourier::new()));
+        let made = data(&s.create(
+            &create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
+            at("2026-10-28T08:00:00Z"),
+        ));
+        let id = made["experiment"]["id"].as_str().unwrap().to_string();
+        let out = envelope(&s.publish_head(
+            &json!({ "experimentId": id }).to_string(),
+            at("2026-10-28T09:00:00Z"),
+        ));
+        assert_eq!(out["ok"], json!(false));
+        assert_eq!(out["error"]["code"], json!("not_wired"));
+    }
+
+    #[test]
+    fn a_submitter_without_an_rln_membership_is_told_what_is_missing() {
+        // SPEC Q9: on logos.test a node needs a funded membership before it
+        // may publish. Watching a spinner is the wrong way to find out.
+        let scratch = Scratch::new("rln");
+        let mut s = publishing_in(&scratch);
+        s.attach_courier(Box::new(crate::delivery::MemoryCourier::without_rln()));
+        let out = envelope(&s.announce_submission(
+            &json!({
+                "experimentId": "q7k2m3x4w3b5n6tz",
+                "cid": "logos:zSub",
+                "protocolId": "wildlife-sighting",
+                "version": 2
+            })
+            .to_string(),
+            at("2026-10-28T09:00:00Z"),
+        ));
+        assert_eq!(out["ok"], json!(false));
+        assert_eq!(out["error"]["code"], json!("rln_not_ready"));
+        assert_eq!(out["error"]["retryable"], json!(false));
+        assert_eq!(out["error"]["rln"]["required"], json!(true));
+        assert_eq!(out["error"]["rln"]["ready"], json!(false));
+        assert!(!s.can_announce());
+    }
+
+    #[test]
+    fn a_receipt_arriving_marks_the_submission_as_received() {
+        let scratch = Scratch::new("receipt");
+        let creator_dir = Scratch::new("receiptcreator");
+        let mut s = publishing_in(&scratch);
+        s.attach_courier(Box::new(crate::delivery::MemoryCourier::new()));
+        // The fixture experiment, whose creator is the fixture key — so the
+        // head check does not apply and a receipt is simply recorded.
+        let creator = Identity::load_or_create(creator_dir.0.as_path()).unwrap().public_hex();
+        let announcement = signed_by(
+            &creator_dir,
+            crate::delivery::receipt("q7k2m3x4w3b5n6tz", &creator, "logos:zSub", 2, "2026-10-28T09:00:00Z"),
+        );
+        let out = data(&s.deliver(
+            &arriving("q7k2m3x4w3b5n6tz", &announcement, "0xfff"),
+            at("2026-10-28T09:00:10Z"),
+        ));
+        assert_eq!(out["handled"], json!(true), "{out}");
+        assert_eq!(out["kind"], json!("receipt"));
+        assert_eq!(out["cid"], json!("logos:zSub"));
+        assert_eq!(out["index_page"], json!(2));
+
+        // And announcing that submission now reports the receipt, which is
+        // what turns S3's "waiting" into "received".
+        let announced = data(&s.announce_submission(
+            &json!({
+                "experimentId": "q7k2m3x4w3b5n6tz",
+                "cid": "logos:zSub",
+                "protocolId": "wildlife-sighting",
+                "version": 2
+            })
+            .to_string(),
+            at("2026-10-28T09:00:20Z"),
+        ));
+        assert_eq!(announced["receipt"]["cid"], json!("logos:zSub"));
+    }
+
+    #[test]
+    fn watching_subscribes_to_every_experiment_this_node_knows() {
+        // No scratch directory: subscribing needs no signing key.
+        let courier = std::sync::Arc::new(crate::delivery::MemoryCourier::new());
+        let mut s = seeded();
+        s.attach_courier(Box::new(SharedCourier(courier.clone())));
+        let watched = s.watch_topics();
+        assert_eq!(watched, vec![crate::delivery::topic("q7k2m3x4w3b5n6tz")]);
+        assert_eq!(courier.subscriptions(), watched);
+    }
+
+    #[test]
+    fn a_message_on_a_topic_that_is_not_ours_is_left_alone() {
+        let scratch = Scratch::new("nottours");
+        let mut s = publishing_in(&scratch);
+        let out = data(&s.deliver(
+            &json!({ "topic": "/waku/2/default-waku/proto", "messageHash": "0x1", "payload": "{}" })
+                .to_string(),
+            at("2026-10-28T09:00:00Z"),
+        ));
+        assert_eq!(out["handled"], json!(false));
+        assert_eq!(out["reason"], json!("not_ours"));
+    }
+
+    #[test]
+    fn an_unreadable_payload_is_reported_rather_than_panicking() {
+        let scratch = Scratch::new("garbage");
+        let mut s = publishing_in(&scratch);
+        let out = data(&s.deliver(
+            &json!({
+                "topic": crate::delivery::topic("q7k2m3x4w3b5n6tz"),
+                "messageHash": "0x2",
+                "payload": "not json"
+            })
+            .to_string(),
+            at("2026-10-28T09:00:00Z"),
+        ));
+        assert_eq!(out["handled"], json!(false));
+        assert_eq!(out["reason"], json!("unreadable"));
+    }
+
+    #[test]
+    fn draining_handles_everything_that_arrived() {
+        let scratch = Scratch::new("drain");
+        let submitter_dir = Scratch::new("drainsub");
+        let (mut s, id, store, courier) = creator_with_delivery(&scratch);
+        let (cid, submitter) = a_submission_from_a_stranger(&submitter_dir, &store, &id);
+        let announcement = signed_by(
+            &submitter_dir,
+            crate::delivery::submission(&id, &submitter, &cid, "bird-sighting", 1, "2026-10-25T09:00:10Z"),
+        );
+        courier.arrive(&crate::delivery::topic(&id), "0xaaa", &announcement);
+        // And one that is not ours, to prove a bad message does not stop the
+        // batch.
+        courier.arrive("/waku/2/default-waku/proto", "0xbbb", &json!({}));
+
+        let out = data(&s.drain(at("2026-10-25T09:00:20Z")));
+        assert_eq!(out["received"], json!(2), "{out}");
+        assert_eq!(out["handled"], json!(1), "{out}");
+        assert_eq!(out["results"][0]["cid"], json!(cid));
+        assert_eq!(out["results"][1]["reason"], json!("not_ours"));
+
+        // Drained: a second pass has nothing to do, rather than re-handling
+        // the batch.
+        assert_eq!(data(&s.drain(at("2026-10-25T09:00:30Z")))["received"], json!(0));
+    }
+
+    #[test]
+    fn draining_without_delivery_says_so() {
+        let scratch = Scratch::new("drainnone");
+        let mut s = publishing_in(&scratch);
+        let out = envelope(&s.drain(at("2026-10-25T09:00:20Z")));
+        assert_eq!(out["ok"], json!(false));
+        assert_eq!(out["error"]["code"], json!("not_wired"));
+    }
+
+    /// A courier two owners can look at, like `SharedStore`.
+    struct SharedCourier(std::sync::Arc<crate::delivery::MemoryCourier>);
+
+    impl Courier for SharedCourier {
+        fn send(&self, topic: &str, payload: &[u8]) -> Result<String, crate::delivery::DeliveryError> {
+            self.0.send(topic, payload)
+        }
+        fn subscribe(&self, topic: &str) -> Result<(), crate::delivery::DeliveryError> {
+            self.0.subscribe(topic)
+        }
+        fn rln(&self) -> crate::delivery::RlnStatus {
+            self.0.rln()
+        }
+        fn inbox(&self) -> Vec<Value> {
+            self.0.inbox()
+        }
+    }
+
     /// A store two owners can look at: the session takes a `Box`, and a test
     /// that wants to inspect what landed needs its own handle.
     struct SharedStore(std::sync::Arc<crate::store::MemoryStore>);
@@ -2625,6 +3703,10 @@ mod tests {
             store: None,
             publications: BTreeMap::new(),
             state_dir: None,
+            courier: None,
+            seen: delivery::Seen::default(),
+            receipts: BTreeMap::new(),
+            heads: BTreeMap::new(),
         };
         let out = envelope(&s.create(
             &create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
@@ -2647,6 +3729,10 @@ mod tests {
             store: None,
             publications: BTreeMap::new(),
             state_dir: None,
+            courier: None,
+            seen: delivery::Seen::default(),
+            receipts: BTreeMap::new(),
+            heads: BTreeMap::new(),
         }
     }
 
@@ -2756,6 +3842,10 @@ mod tests {
             store: None,
             publications: BTreeMap::new(),
             state_dir: None,
+            courier: None,
+            seen: delivery::Seen::default(),
+            receipts: BTreeMap::new(),
+            heads: BTreeMap::new(),
         };
         let out = data(&s.list(at("2026-10-28T08:00:00Z")));
         let cards = out["experiments"].as_array().unwrap();

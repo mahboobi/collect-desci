@@ -22,12 +22,13 @@
 //!   cross the ABI. No structs, no maps — which is why every method takes and
 //!   returns a JSON string, as SPEC section 6 describes.
 
-use collect_core_logic::{api, session::Session, store::DocumentStore};
+use collect_core_logic::{api, delivery::Courier, session::Session, store::DocumentStore};
 
 // The real Logos Storage client. Kept in its own file because it is the only
 // thing here that talks to another module, and because it is the one part of
 // this crate that can be compiled outside the Nix build (it does not touch
 // the generated scaffold) — see its own docs.
+mod courier;
 mod storage;
 
 /// Collect's core: documents, signing, validation, media and indexing.
@@ -69,6 +70,10 @@ pub trait CollectCoreModule: Send + 'static {
     /// The creator's verdict on a received submission: contract, signature,
     /// window, repeat and rate limits, hidden keys, then field validation.
     fn index_accept(&mut self, request: String) -> String;
+
+    /// Handle one message that arrived on a topic we watch. Normally reached
+    /// through `delivery_drain`; exposed for `logoscore call` and tests.
+    fn delivery_deliver(&mut self, request: String) -> String;
 
     /// Lay accepted entries out across index pages.
     fn index_page(&mut self, request: String) -> String;
@@ -123,6 +128,21 @@ pub trait CollectCoreModule: Send + 'static {
     /// Write the results table out as a CSV or JSON file, optionally with the
     /// photos beside it. Returns the path: the QML side cannot write files.
     fn results_export(&mut self, request: String) -> String;
+
+    /// What this node can do on the network: whether Delivery is attached,
+    /// and what RLN membership it has.
+    fn delivery_status(&mut self) -> String;
+
+    /// Handle everything that has arrived on the topics we watch. The UI
+    /// calls this on a timer.
+    fn delivery_drain(&mut self) -> String;
+
+    /// The creator announcing where the current manifest and index are.
+    /// Re-sent every 10 minutes (SPEC 3.3).
+    fn delivery_publish_head(&mut self, request: String) -> String;
+
+    /// A submitter announcing that a submission exists, by CID.
+    fn delivery_announce_submission(&mut self, request: String) -> String;
 
     /// Call any method by its SPEC section 6 name, e.g. `submissions.validate`.
     /// Lets the UI hold one call site, and lets `logoscore call` reach a method
@@ -243,6 +263,11 @@ impl CollectCoreModule for Collect {
         api::index_accept(&request)
     }
 
+    fn delivery_deliver(&mut self, request: String) -> String {
+        let now = chrono::Utc::now();
+        self.session().deliver(&request, now)
+    }
+
     fn index_page(&mut self, request: String) -> String {
         api::index_page(&request)
     }
@@ -310,6 +335,37 @@ impl CollectCoreModule for Collect {
         self.session().export(&request, now)
     }
 
+    fn delivery_status(&mut self) -> String {
+        let announcing = self.session().can_announce();
+        let courier = self.session().courier_description();
+        let rln = self.session().rln_status();
+        serde_json::json!({
+            "ok": true,
+            "data": {
+                "attached": courier.is_some(),
+                "courier": courier,
+                "announcing": announcing,
+                "rln": rln,
+            }
+        })
+        .to_string()
+    }
+
+    fn delivery_drain(&mut self) -> String {
+        let now = chrono::Utc::now();
+        self.session().drain(now)
+    }
+
+    fn delivery_publish_head(&mut self, request: String) -> String {
+        let now = chrono::Utc::now();
+        self.session().publish_head(&request, now)
+    }
+
+    fn delivery_announce_submission(&mut self, request: String) -> String {
+        let now = chrono::Utc::now();
+        self.session().announce_submission(&request, now)
+    }
+
     fn call(&mut self, method: String, request: String) -> String {
         // The stateful methods live on Session, which api::dispatch cannot
         // reach — it only knows the pure functions. Routing them here is what
@@ -328,6 +384,11 @@ impl CollectCoreModule for Collect {
             "submitters.hide" => self.session().set_hidden(&request, true, now),
             "submitters.show" => self.session().set_hidden(&request, false, now),
             "results.export" => self.session().export(&request, now),
+            "delivery.status" => self.delivery_status(),
+            "delivery.drain" => self.session().drain(now),
+            "delivery.publishHead" => self.session().publish_head(&request, now),
+            "delivery.announceSubmission" => self.session().announce_submission(&request, now),
+            "delivery.deliver" => self.session().deliver(&request, now),
             _ => api::dispatch(&method, &request),
         }
     }
@@ -353,6 +414,31 @@ impl CollectCoreModule for Collect {
                 self.session().attach_store(Box::new(store));
             }
             Err(e) => eprintln!("collect_core: not publishing: {e}"),
+        }
+
+        // Delivery, attached separately again and for the same reason: a node
+        // that can sign and publish but not announce is still useful — the
+        // documents are on Storage and a link carries their CIDs — so a
+        // Delivery failure must not take the rest down with it.
+        match courier::LogosDelivery::connect() {
+            Ok(courier) => {
+                eprintln!("collect_core: announcing over {}", courier.describe());
+                let rln = courier.rln();
+                if rln.required && !rln.ready {
+                    // SPEC Q9. Said plainly at startup, because every
+                    // submitter-side announcement will refuse until it is
+                    // fixed and the reason is not discoverable from the UI.
+                    eprintln!(
+                        "collect_core: RLN membership is `{}` ({}) — this node cannot publish announcements yet",
+                        rln.state, rln.message
+                    );
+                }
+                self.session().attach_courier(Box::new(courier));
+                for topic in self.session().watch_topics() {
+                    eprintln!("collect_core: watching {topic}");
+                }
+            }
+            Err(e) => eprintln!("collect_core: not announcing: {e}"),
         }
     }
 }
