@@ -574,3 +574,86 @@ Nothing has been **loaded**. The package builds and validates structurally, but
 `lgs basecamp setup` has not run, so no module has been installed into a
 profile and no call has crossed the real ABI. Q9 (RLN membership) and the
 whole Storage/Delivery surface remain untouched.
+
+
+---
+
+## Round 4 — the Storage contract itself, 29 October 2026
+
+Rounds 1-3 read the rendered API reference. This round reads the contract the
+module publishes:
+
+```
+nix build github:logos-co/logos-storage-module#lidl
+```
+
+It is committed as `docs/storage_module.lidl` (storage_module 3.0.2, flake rev
+`7548f41`). Everything below is from that file, and three items contradict what
+the prose implied.
+
+**1. Every event payload is `tstr`, not an object.** The contract is
+`event storageUploadDone(payload: tstr)`, and the JSON shape in the description
+is the shape *of that string*. So an event arrives as the argument array holding
+one JSON **string**, and reading it as an object yields null for every field —
+which is indistinguishable from an upload that never completed. This is the
+single most dangerous detail here, because getting it wrong fails silently as a
+timeout. `rust-lib/src/storage.rs::payload_of` is the parse, and
+`an_event_payload_is_parsed_out_of_its_json_string` is the guard.
+
+**2. `downloadToUrl` is asynchronous.** Round 2 treated the `_with_timeout`
+call bound as the fetch bound. It is not: the call returns a session id as soon
+as the request is accepted, and the file is written later, with completion on
+`storageDownloadDone`. A `get` that reads the file when the call returns reads
+nothing. Note also that `storageDownloadDone` carries **no `cid`** — only
+`success`, `sessionId` and `error` — so a download has to be keyed on the
+session id (which the contract says equals the CID).
+
+**3. The node has to be started, and that is our job.** `init(cfg)` then
+`start()`, with completion on `storageStart` (whose payload reports its reason
+in `message`, not `error`). Nothing else in Basecamp necessarily starts it.
+`init` is documented as once-per-instance, so a second call failing is expected
+rather than fatal. `loadConfigOrDefault()` returns the module's own saved
+configuration or its defaults — which is what we pass, rather than inventing a
+config, because it carries the network, data directory and quota.
+
+**4. There is a synchronous CID path, and we are not using it.**
+`uploadInit` (sync, returns a session id) -> `uploadChunk` -> `uploadFinalize`
+(**sync, returns the CID**) would avoid all event-waiting. It moves each chunk
+as `tstr`, though, which is wrong for photo bytes, and the same store carries
+media later. One path for documents and media is worth the event plumbing.
+
+**5. Confirmations.** No pin (only `setAdvertise`, and "published DHT records
+are not withdrawn; they stop being republished and expire"). `remove(cid)` is
+local and background, with `storageRemoveDone`. `manifests()` lists local
+holdings only. `exists(cid)` is synchronous. Quota 20 GiB, chunk default 65536.
+
+### Declaring the dependency: what the builder actually requires
+
+Putting `storage_module` in `metadata.json` `dependencies` **fails the build**:
+
+```
+error: metadata.json: module 'collect_core' lists dependencies that publish no LIDL
+contract: storage_module
+...
+Fix: pass the flake input for each name above and re-pin it against a current
+logos-module-builder ... For a target whose contract you do not want to pin at
+all, drop the declaration and call it by name through modules().dynamic("<name>").
+```
+
+So a declared dependency needs a flake input publishing
+`packages.<system>.lidl`. `logos-storage-module` does publish one, so the typed
+route is available — but it pins the whole module into our flake and the typed
+client only exists inside a Nix build, which costs the fast local compile check
+that caught all three mistakes above. We call by name instead, through
+`LogosModuleSDK::new().plugin("storage_module")` — the same thing a generated
+client's `::new()` does — and read the contract out of band, as here.
+
+### The dev Basecamp has no storage_module
+
+`logos-basecamp-0.3.0` as built by the scaffold ships four core modules:
+`capability_module`, `modules_state`, `package_manager`, `package_downloader`.
+The installed `/Applications/LogosBasecamp.app` additionally has
+`storage_module`, but that is the non-dev variant and cannot be mixed with our
+`-dev` modules (see `tools/load.sh` VARIANTS). So Storage has to be built from
+the flake for the dev variant and installed into the profile like any other
+module.

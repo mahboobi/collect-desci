@@ -42,6 +42,13 @@ is not copied. See `docs/api-verification.md` round 3.
 ## Platform constraints
 
 1. QML UI modules are sandboxed: no network, no files outside the module. All Storage, Delivery, file and crypto work happens in `collect_core`; the UI calls it with `logos.callModule`.
+1b. Storage is reached by name, not as a declared dependency: naming it in
+   `metadata.json` fails the build because it publishes no LIDL contract our
+   flake pins. The contract is committed at `docs/storage_module.lidl` — read
+   it, not the rendered reference. Three traps it corrects: every event payload
+   is a JSON **string** (`payload: tstr`), so it must be parsed and not
+   indexed; `downloadToUrl` is **async** and its completion event carries no
+   CID; and the node must be `init()`-ed and `start()`-ed by us.
 2. Logos Storage has no network-wide listing and no paid persistence. There is **no pin operation**: keeping a document means its bytes are in local storage, `remove()` is never called, and `advertise` stays on. `manifests()` does list what the local node holds. `remove()` deletes locally only — the DHT record is not withdrawn and other nodes keep what they fetched, so nothing published is ever retractable. The index pages on Storage are the durable list of submissions.
 3. Delivery Store is temporary and its retention is operator-configured. Messages cap out at ~150 KiB. Submitters re-announce until they get a receipt; the creator re-publishes `head` every 10 minutes. **`logos.test` requires a funded RLN membership before a node starts** (600 s epochs) — see SPEC.md Q9, which gates submitter-side announcements.
 4. Logos Chat addresses change on every launch; do not use Chat for anything here.
@@ -64,7 +71,15 @@ is not copied. See `docs/api-verification.md` round 3.
 - Build the UI against fixtures (`COLLECT_FIXTURES=1`, data from `examples/`) first, then wire to live data. `COLLECT_FIXTURES` belongs to `collect_core`: the QML sandbox cannot read `examples/`, so fixture and live data reach the UI the same way, through `Core.qml`.
 - Set `QT_QUICK_CONTROLS_STYLE=Basic`. The design system customizes `background` and `contentItem` on every control, which the macOS native style refuses — controls silently lose their styling otherwise.
 - A QML property may not be named `on<Something>`: it parses as a handler for a signal `<something>`. `design/Theme.qml` shipped with `onAccent`, which made the file unloadable; it is `textOnAccent` now, while `design/tokens.json` keeps the `onAccent` key.
-- Tests: schema validation of examples, signing and verification, metadata stripping, rounding, index paging, window checks, rate limit. Run `python3 tools/validate.py`, `cargo test` in `modules/collect_core`, and `modules/collect_ui/tests/run.sh` in CI.
+- A CID is taken over the **canonical JSON of the signed document**, `sig`
+  included — the only representation two nodes are guaranteed to agree on. A
+  CID written into a document must match `^logos:[A-Za-z0-9]+$`; validate and
+  prefix the raw address rather than trusting it (`store::as_document_cid`).
+- A signed document cannot be edited. Changing a manifest (attaching a form,
+  editing details) makes a **new version**: bump `version`, set `prev` to the
+  CID the old version was published to, re-sign, re-validate, re-publish.
+  `Session::reseal` is the only place that does this.
+- Tests: schema validation of examples, signing and verification, metadata stripping, rounding, index paging, window checks, rate limit. Run `python3 tools/validate.py`, `tools/cargo.sh test` in `modules/collect_core/rust-lib/core`, and `modules/collect_ui/tests/run.sh` in CI. `tools/cargo.sh` exists because `~/.rustup` has no default toolchain; it pins the same cargo/rustc the Nix module build uses.
 
 ## Do not
 

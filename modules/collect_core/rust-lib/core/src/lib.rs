@@ -22,4 +22,5 @@ pub mod media;
 pub mod schema;
 pub mod session;
 pub mod sign;
+pub mod store;
 

@@ -10,9 +10,11 @@
 //! Logos Storage (SPEC Q9/Q12), so `publish` is deliberately absent rather
 //! than faked.
 
+use crate::store::{self, DocumentStore};
 use crate::{api, fields, identity::Identity, ids, schema};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// How an experiment reads on the dashboard.
@@ -36,6 +38,41 @@ impl Standing {
     }
 }
 
+/// What became of a document's upload.
+///
+/// Absent from the map means never attempted — a different thing from failed,
+/// and the UI says so differently ("saved on this node" versus "could not
+/// publish"). Keyed by document id rather than stored inside the document,
+/// because a CID is taken over the document's own bytes and so cannot be one
+/// of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Publication {
+    /// On Logos Storage, at this CID.
+    Published(String),
+    /// Tried, and did not get there.
+    Failed { code: String, message: String },
+}
+
+impl Publication {
+    pub fn cid(&self) -> Option<&str> {
+        match self {
+            Publication::Published(cid) => Some(cid),
+            Publication::Failed { .. } => None,
+        }
+    }
+
+    /// How it reads in a response: `published`, plus the CID or the reason.
+    fn as_json(&self) -> Value {
+        match self {
+            Publication::Published(cid) => json!({ "published": true, "cid": cid }),
+            Publication::Failed { code, message } => json!({
+                "published": false,
+                "publish_error": { "code": code, "message": message },
+            }),
+        }
+    }
+}
+
 /// What this node knows.
 pub struct Session {
     /// Experiment manifests, newest last.
@@ -53,6 +90,12 @@ pub struct Session {
     /// `None` means documents cannot be signed yet and are not pretended to
     /// be — `create` refuses rather than emitting a placeholder.
     identity: Option<Identity>,
+    /// Logos Storage, if the host gave us a working client. `None` means
+    /// documents stay on this node; they are still signed and still valid,
+    /// they just have no address anyone else could fetch.
+    store: Option<Box<dyn DocumentStore>>,
+    /// Upload outcome per document id. See `Publication`.
+    publications: BTreeMap<String, Publication>,
 }
 
 impl Default for Session {
@@ -73,6 +116,8 @@ impl Session {
             // open.
             creator_key: "3a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f21".into(),
             identity: None,
+            store: None,
+            publications: BTreeMap::new(),
         };
         if api::fixtures_enabled() {
             session.seed_fixtures();
@@ -299,6 +344,117 @@ impl Session {
         }
     }
 
+    /// Hand the session a Logos Storage client.
+    ///
+    /// Called from `on_context_ready` once the dependency proxy exists. Until
+    /// then — and in fixtures mode, and in every test that does not ask for
+    /// one — there is no store, and documents are kept locally without
+    /// pretending otherwise.
+    pub fn attach_store(&mut self, store: Box<dyn DocumentStore>) {
+        self.store = Some(store);
+    }
+
+    /// Whether documents created from here on can get a real address.
+    pub fn can_publish(&self) -> bool {
+        self.store.is_some()
+    }
+
+    /// What this node is publishing to, for `session.capabilities`.
+    pub fn store_description(&self) -> Option<String> {
+        self.store.as_ref().map(|s| s.describe())
+    }
+
+    /// The upload outcome for a document id, if one was ever attempted.
+    pub fn publication(&self, id: &str) -> Option<&Publication> {
+        self.publications.get(id)
+    }
+
+    /// The CID a document sits at, if it got one.
+    fn cid_of(&self, id: &str) -> Option<&str> {
+        self.publications.get(id).and_then(Publication::cid)
+    }
+
+    /// Publish a signed document and remember what happened.
+    ///
+    /// `None` means no Storage is attached, so nothing was attempted — which
+    /// is reported differently from a failure, because a creator can do
+    /// nothing about the first and may want to retry the second.
+    fn publish_doc(&mut self, kind: &str, doc: &Value) -> Option<Publication> {
+        let id = doc
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        // Scoped so the immutable borrow of `store` is over before the map is
+        // written.
+        let result = {
+            let store = self.store.as_deref()?;
+            store::publish(store, kind, doc)
+        };
+        let outcome = match result {
+            Ok(cid) => Publication::Published(cid),
+            Err(e) => Publication::Failed { code: e.code().to_string(), message: e.to_string() },
+        };
+        self.publications.insert(id, outcome.clone());
+        Some(outcome)
+    }
+
+    /// How a publish attempt reads in a response, including the never-tried
+    /// case. One shape for every method that writes a document, so the UI has
+    /// a single thing to render.
+    fn publish_report(&self, id: &str) -> Value {
+        match self.publications.get(id) {
+            Some(p) => p.as_json(),
+            None => json!({
+                "published": false,
+                "note": "Saved on this node only — no Logos Storage is attached to this build.",
+            }),
+        }
+    }
+
+    /// Re-sign and re-publish a manifest whose `protocols` list changed.
+    ///
+    /// A signed document cannot be edited: changing one byte invalidates the
+    /// signature, so an amended manifest is a *new version* of it rather than
+    /// the same one patched. `version` goes up, `prev` points at the CID the
+    /// previous version was published to — which is what makes the chain in
+    /// SPEC 4 walkable — and the whole document is signed again. Without
+    /// this, attaching a form would upload a manifest whose signature no
+    /// longer verifies, and every reader would reject it.
+    fn reseal(&mut self, experiment_id: &str) -> Result<Value, String> {
+        let Some(at) = self
+            .experiments
+            .iter()
+            .position(|e| e.get("id").and_then(Value::as_str) == Some(experiment_id))
+        else {
+            return Err(format!("no experiment `{experiment_id}` on this node"));
+        };
+
+        let prev = match self.cid_of(experiment_id) {
+            Some(cid) => Value::String(cid.to_string()),
+            None => Value::Null,
+        };
+        let mut doc = self.experiments[at].clone();
+        let version = doc.get("version").and_then(Value::as_u64).unwrap_or(1) + 1;
+        doc["version"] = json!(version);
+        doc["prev"] = prev;
+        // Replaced by the signature over the new content.
+        doc["sig"] = json!("00".repeat(64));
+
+        let doc = self.signed(&doc)?;
+        let errors = schema::errors_as(&doc, schema::Kind::Experiment);
+        if !errors.is_empty() {
+            return Err(format!(
+                "the updated experiment does not validate: {}",
+                errors.join("; ")
+            ));
+        }
+
+        self.experiments[at] = doc.clone();
+        self.publish_doc("experiment", &doc);
+        Ok(doc)
+    }
+
     fn standing(experiment: &Value, now: DateTime<Utc>) -> Standing {
         let parse = |key: &str| {
             experiment
@@ -359,7 +515,12 @@ impl Session {
             // Which side of the app this card belongs to. The dashboard shows
             // both, in separate sections.
             "mine": creator == self.creator_key,
-            "link": ids::link(id, "logos:pending"),
+            // A link is only shareable once the manifest has an address; with
+            // no Storage it still carries `logos:pending`, which the detail
+            // screen shows as not yet publishable rather than hiding.
+            "link": ids::link(id, self.cid_of(id).unwrap_or("logos:pending")),
+            "published": self.cid_of(id).is_some(),
+            "cid": self.cid_of(id).map(Value::from).unwrap_or(Value::Null),
         })
     }
 
@@ -425,11 +586,13 @@ impl Session {
             .cloned()
             .collect();
 
-        api::envelope_ok(json!({
+        let mut data = json!({
             "experiment": experiment,
             "protocols": held,
             "missing_protocols": named.len() - held.len(),
-        }))
+        });
+        merge(&mut data, self.publish_report(wanted));
+        api::envelope_ok(data)
     }
 
     /// `experiments.create` — a new manifest from the C2 form.
@@ -521,13 +684,57 @@ impl Session {
         }
 
         self.experiments.push(experiment.clone());
-        api::envelope_ok(json!({
+        // Publish after the document is complete and validated, never before:
+        // a CID is the address of these exact bytes, so uploading a draft
+        // would publish an address nothing else ever refers to.
+        self.publish_doc("experiment", &experiment);
+        let mut data = json!({
             "created": true,
             "problems": [],
             "experiment": experiment,
-            "published": false,
-            "note": "Saved on this node only. Publishing needs Logos Storage, which is not wired yet.",
-        }))
+        });
+        merge(&mut data, self.publish_report(&id));
+        api::envelope_ok(data)
+    }
+
+    /// `experiments.publish` — try again to put a document on Storage.
+    ///
+    /// Exists because `storage_timeout` and `storage_rejected` are retryable:
+    /// without this, one bad moment would leave a signed, valid experiment
+    /// permanently unaddressable with no way forward but recreating it. The
+    /// document is republished exactly as it stands, so a retry that succeeds
+    /// lands on the same CID a first attempt would have.
+    pub fn publish_now(&mut self, raw: &str) -> String {
+        let request: Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
+        };
+        let Some(wanted) = request.get("experimentId").and_then(Value::as_str) else {
+            return api::envelope_err(api::code::BAD_REQUEST, "`experimentId` is required");
+        };
+        let Some(doc) = self
+            .experiments
+            .iter()
+            .find(|e| e.get("id").and_then(Value::as_str) == Some(wanted))
+            .cloned()
+        else {
+            return api::envelope_err(
+                api::code::BAD_REQUEST,
+                format!("no experiment `{wanted}` on this node"),
+            );
+        };
+        if !self.can_publish() {
+            return api::envelope_err(
+                api::code::NOT_WIRED,
+                "no Logos Storage is attached to this build",
+            );
+        }
+
+        let id = wanted.to_string();
+        self.publish_doc("experiment", &doc);
+        let mut data = json!({ "experiment": doc });
+        merge(&mut data, self.publish_report(&id));
+        api::envelope_ok(data)
     }
 
     /// `protocols.saveDraft` — attach or replace a protocol on an experiment.
@@ -615,16 +822,26 @@ impl Session {
             .retain(|p| p.get("id").and_then(Value::as_str) != Some(protocol_id.as_str()));
         self.protocols.push(protocol.clone());
 
+        // The form goes up first, so the manifest entry can name a real
+        // address. `logos:pending` stands in only while there is no Storage;
+        // it is a placeholder a reader can recognise, not a fake CID.
+        self.publish_doc("protocol", &protocol);
+        let protocol_cid = self
+            .cid_of(&protocol_id)
+            .unwrap_or("logos:pending")
+            .to_string();
+
         // Point the manifest at it, replacing any earlier entry for this id.
+        let experiment_id = experiment_id.to_string();
         if let Some(experiment) = self
             .experiments
             .iter_mut()
-            .find(|e| e.get("id").and_then(Value::as_str) == Some(experiment_id))
+            .find(|e| e.get("id").and_then(Value::as_str) == Some(experiment_id.as_str()))
         {
             let entry = json!({
                 "id": protocol_id,
                 "version": version,
-                "cid": "logos:pending",
+                "cid": protocol_cid,
                 "status": "open"
             });
             match experiment.get_mut("protocols").and_then(Value::as_array_mut) {
@@ -638,13 +855,32 @@ impl Session {
             }
         }
 
-        api::envelope_ok(json!({
+        // The manifest now says something different from what it was signed
+        // over, so it has to become a new, re-signed version of itself.
+        let manifest = match self.reseal(&experiment_id) {
+            Ok(doc) => doc,
+            Err(e) => return api::envelope_err(api::code::INVALID_DOCUMENT, e),
+        };
+
+        let mut data = json!({
             "saved": true,
             "problems": [],
             "protocol": protocol,
-            "published": false,
-            "note": "Saved on this node only. Publishing needs Logos Storage, which is not wired yet.",
-        }))
+            "experiment": manifest,
+        });
+        merge(&mut data, self.publish_report(&protocol_id));
+        api::envelope_ok(data)
+    }
+}
+
+/// Copy `extra`'s keys onto `target`, so a response can be assembled from a
+/// literal plus a shared report without one of them having to know the other's
+/// shape. Non-objects are ignored rather than replacing the target.
+fn merge(target: &mut Value, extra: Value) {
+    if let (Some(into), Some(from)) = (target.as_object_mut(), extra.as_object()) {
+        for (k, v) in from {
+            into.insert(k.clone(), v.clone());
+        }
     }
 }
 
@@ -674,6 +910,9 @@ fn slug(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the tests build a failing store, so this would be dead weight in
+    // the module itself.
+    use crate::store::StoreError;
 
     fn at(ts: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(ts).unwrap().with_timezone(&Utc)
@@ -723,6 +962,8 @@ mod tests {
             index_pages: Vec::new(),
             creator_key: "3a".repeat(32),
             identity: None,
+            store: None,
+            publications: BTreeMap::new(),
         };
         let public = session
             .attach_identity(scratch.0.to_str().unwrap())
@@ -742,6 +983,266 @@ mod tests {
             "creatorName": "Dr Rao"
         })
         .to_string()
+    }
+
+    /// A session that can sign *and* publish, to an in-process store.
+    fn publishing_in(scratch: &Scratch) -> Session {
+        let mut session = empty_in(scratch);
+        session.attach_store(Box::new(crate::store::MemoryStore::new()));
+        session
+    }
+
+    /// The protocol draft used by the publishing tests.
+    fn draft_for(id: &str) -> String {
+        json!({
+            "experimentId": id,
+            "protocol": {
+                "name": "Bird sighting",
+                "fields": [
+                    { "key": "count", "type": "number", "label": "How many", "required": true }
+                ]
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn without_a_store_nothing_is_published_and_the_response_says_so() {
+        let scratch = Scratch::new("nostore");
+        let mut s = empty_in(&scratch);
+        let made = data(&s.create(
+            &create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
+            at("2026-10-28T08:00:00Z"),
+        ));
+        assert_eq!(made["published"], json!(false));
+        // Never tried is not the same as failed, so there is no error to show.
+        assert_eq!(made["publish_error"], Value::Null);
+        assert!(made["note"].as_str().unwrap().contains("no Logos Storage"));
+        assert!(!s.can_publish());
+    }
+
+    #[test]
+    fn creating_with_a_store_publishes_the_manifest_and_reports_its_cid() {
+        let scratch = Scratch::new("pubcreate");
+        let mut s = publishing_in(&scratch);
+        let made = data(&s.create(
+            &create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
+            at("2026-10-28T08:00:00Z"),
+        ));
+        assert_eq!(made["published"], json!(true), "{made}");
+        let cid = made["cid"].as_str().expect("a cid");
+        assert!(cid.starts_with("logos:"), "{cid}");
+        assert!(s.can_publish());
+
+        // And the dashboard card carries the same address, so the share link
+        // stops saying `pending`.
+        let card = &data(&s.list(at("2026-10-28T08:00:00Z")))["experiments"][0];
+        assert_eq!(card["cid"], json!(cid));
+        assert_eq!(card["published"], json!(true));
+        assert!(card["link"].as_str().unwrap().contains(cid.trim_start_matches("logos:")));
+    }
+
+    #[test]
+    fn the_published_bytes_are_the_canonical_document() {
+        // The CID has to address exactly what a reader would canonicalize
+        // from the document it fetched — otherwise the address and the
+        // content disagree and verification is impossible.
+        let scratch = Scratch::new("pubbytes");
+        let store = std::sync::Arc::new(crate::store::MemoryStore::new());
+        let mut s = empty_in(&scratch);
+        s.attach_store(Box::new(SharedStore(store.clone())));
+        let made = data(&s.create(
+            &create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
+            at("2026-10-28T08:00:00Z"),
+        ));
+        let cid = made["cid"].as_str().unwrap();
+        let fetched = store.get(crate::store::bare_cid(cid), true).unwrap();
+        assert_eq!(
+            fetched,
+            crate::canonical::to_bytes(&made["experiment"]).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_failing_store_does_not_lose_the_experiment() {
+        // Storage being down is not a reason to throw away a signed, valid
+        // document the creator just made. It is kept, and the failure is
+        // reported with a code the UI can offer a retry on.
+        let scratch = Scratch::new("pubfail");
+        let mut s = empty_in(&scratch);
+        s.attach_store(Box::new(crate::store::MemoryStore::failing(
+            StoreError::Timeout("no completion in 30s".into()),
+        )));
+        let made = data(&s.create(
+            &create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
+            at("2026-10-28T08:00:00Z"),
+        ));
+        assert_eq!(made["created"], json!(true));
+        assert_eq!(made["published"], json!(false));
+        assert_eq!(made["publish_error"]["code"], json!("storage_timeout"));
+        assert_eq!(data(&s.list(at("2026-10-28T08:00:00Z")))["experiments"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn attaching_a_form_publishes_it_and_names_its_cid_in_the_manifest() {
+        let scratch = Scratch::new("pubform");
+        let mut s = publishing_in(&scratch);
+        let now = at("2026-10-28T08:00:00Z");
+        let made = data(&s.create(&create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"), now));
+        let id = made["experiment"]["id"].as_str().unwrap().to_string();
+
+        let saved = data(&s.save_protocol(&draft_for(&id), now));
+        assert_eq!(saved["published"], json!(true), "{saved}");
+        let form_cid = saved["cid"].as_str().expect("a cid").to_string();
+
+        // The manifest entry points at the form's real address rather than
+        // the placeholder.
+        let entry = &saved["experiment"]["protocols"][0];
+        assert_eq!(entry["cid"], json!(form_cid));
+        assert_ne!(entry["cid"], json!("logos:pending"));
+    }
+
+    #[test]
+    fn amending_a_manifest_resigns_it_as_a_new_version() {
+        // Editing a signed document invalidates its signature. Attaching a
+        // form edits the manifest, so the manifest has to become a new signed
+        // version of itself — otherwise we would publish a document that no
+        // reader could verify.
+        let scratch = Scratch::new("reseal");
+        let mut s = publishing_in(&scratch);
+        let now = at("2026-10-28T08:00:00Z");
+        let made = data(&s.create(&create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"), now));
+        let id = made["experiment"]["id"].as_str().unwrap().to_string();
+        let first_cid = made["cid"].as_str().unwrap().to_string();
+        assert_eq!(made["experiment"]["version"], json!(1));
+        assert_eq!(made["experiment"]["prev"], Value::Null);
+
+        let saved = data(&s.save_protocol(&draft_for(&id), now));
+        let manifest = &saved["experiment"];
+        assert_eq!(manifest["version"], json!(2));
+        // `prev` is the address the previous version was published to, which
+        // is what makes the version chain walkable.
+        assert_eq!(manifest["prev"], json!(first_cid));
+
+        // The signature covers the amended document.
+        let mut key = [0u8; 32];
+        hex::decode_to_slice(s.creator_key(), &mut key).unwrap();
+        assert!(crate::sign::verify_with(manifest, &key).is_ok(), "{manifest}");
+
+        // And the manifest moved to a new address, because its bytes changed.
+        let second_cid = s.publication(&id).unwrap().cid().unwrap().to_string();
+        assert_ne!(second_cid, first_cid);
+    }
+
+    #[test]
+    fn a_resealed_manifest_is_what_gets_published() {
+        // Guards the ordering: if the manifest were published before being
+        // re-signed, the address would hold the stale signature.
+        let scratch = Scratch::new("resealbytes");
+        let store = std::sync::Arc::new(crate::store::MemoryStore::new());
+        let mut s = empty_in(&scratch);
+        s.attach_store(Box::new(SharedStore(store.clone())));
+        let now = at("2026-10-28T08:00:00Z");
+        let made = data(&s.create(&create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"), now));
+        let id = made["experiment"]["id"].as_str().unwrap().to_string();
+        let saved = data(&s.save_protocol(&draft_for(&id), now));
+
+        let cid = s.publication(&id).unwrap().cid().unwrap().to_string();
+        let bytes = store.get(crate::store::bare_cid(&cid), true).unwrap();
+        let published: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(published, saved["experiment"]);
+        let mut key = [0u8; 32];
+        hex::decode_to_slice(s.creator_key(), &mut key).unwrap();
+        assert!(crate::sign::verify_with(&published, &key).is_ok());
+    }
+
+    #[test]
+    fn republishing_an_unchanged_document_does_not_move_it() {
+        // The address is the content, so the same document is the same CID.
+        // This is what makes a retry safe.
+        let scratch = Scratch::new("idempotent");
+        let mut s = publishing_in(&scratch);
+        let now = at("2026-10-28T08:00:00Z");
+        let made = data(&s.create(&create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"), now));
+        let id = made["experiment"]["id"].as_str().unwrap().to_string();
+        let first = s.publication(&id).unwrap().cid().unwrap().to_string();
+        let doc = made["experiment"].clone();
+        s.publish_doc("experiment", &doc);
+        assert_eq!(s.publication(&id).unwrap().cid().unwrap(), first);
+    }
+
+    #[test]
+    fn a_failed_publish_can_be_retried_and_lands_on_the_same_address() {
+        let scratch = Scratch::new("retry");
+        let mut s = empty_in(&scratch);
+        // Fails first...
+        s.attach_store(Box::new(crate::store::MemoryStore::failing(
+            StoreError::Timeout("no completion in 120s".into()),
+        )));
+        let made = data(&s.create(
+            &create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
+            at("2026-10-28T08:00:00Z"),
+        ));
+        let id = made["experiment"]["id"].as_str().unwrap().to_string();
+        assert_eq!(made["publish_error"]["code"], json!("storage_timeout"));
+
+        // ...then Storage comes back, and the retry publishes the document
+        // exactly as it stands.
+        s.attach_store(Box::new(crate::store::MemoryStore::new()));
+        let out = data(&s.publish_now(&json!({ "experimentId": id }).to_string()));
+        assert_eq!(out["published"], json!(true), "{out}");
+        assert_eq!(out["experiment"], made["experiment"]);
+        let cid = out["cid"].as_str().unwrap();
+        assert_eq!(
+            cid,
+            crate::store::as_document_cid(&format!(
+                "mem1{}",
+                {
+                    use sha2::{Digest, Sha256};
+                    let mut h = Sha256::new();
+                    h.update(crate::canonical::to_bytes(&made["experiment"]).unwrap());
+                    hex::encode(h.finalize())
+                }
+            ))
+            .unwrap(),
+            "the retry must address the same bytes"
+        );
+    }
+
+    #[test]
+    fn retrying_without_a_store_is_refused_rather_than_reported_as_published() {
+        let scratch = Scratch::new("retrynostore");
+        let mut s = empty_in(&scratch);
+        let made = data(&s.create(
+            &create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
+            at("2026-10-28T08:00:00Z"),
+        ));
+        let id = made["experiment"]["id"].as_str().unwrap();
+        let out = envelope(&s.publish_now(&json!({ "experimentId": id }).to_string()));
+        assert_eq!(out["ok"], json!(false));
+        assert_eq!(out["error"]["code"], json!("not_wired"));
+    }
+
+    #[test]
+    fn publishing_an_unknown_experiment_is_a_bad_request() {
+        let scratch = Scratch::new("retryunknown");
+        let mut s = publishing_in(&scratch);
+        let out = envelope(&s.publish_now(&json!({ "experimentId": "nope" }).to_string()));
+        assert_eq!(out["ok"], json!(false));
+        assert_eq!(out["error"]["code"], json!("bad_request"));
+    }
+
+    /// A store two owners can look at: the session takes a `Box`, and a test
+    /// that wants to inspect what landed needs its own handle.
+    struct SharedStore(std::sync::Arc<crate::store::MemoryStore>);
+
+    impl crate::store::DocumentStore for SharedStore {
+        fn put(&self, filename: &str, bytes: &[u8]) -> Result<String, StoreError> {
+            self.0.put(filename, bytes)
+        }
+        fn get(&self, cid: &str, local: bool) -> Result<Vec<u8>, StoreError> {
+            self.0.get(cid, local)
+        }
     }
 
     #[test]
@@ -1022,6 +1523,8 @@ mod tests {
             index_pages: Vec::new(),
             creator_key: "3a".repeat(32),
             identity: None,
+            store: None,
+            publications: BTreeMap::new(),
         };
         let out = envelope(&s.create(
             &create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
@@ -1041,6 +1544,8 @@ mod tests {
             index_pages: vec![serde_json::from_str(api::fixture_index()).unwrap()],
             creator_key: "3a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f21".into(),
             identity: None,
+            store: None,
+            publications: BTreeMap::new(),
         }
     }
 
@@ -1147,6 +1652,8 @@ mod tests {
             index_pages: Vec::new(),
             creator_key: "3a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f213a9d0f21".into(),
             identity: None,
+            store: None,
+            publications: BTreeMap::new(),
         };
         let out = data(&s.list(at("2026-10-28T08:00:00Z")));
         let cards = out["experiments"].as_array().unwrap();

@@ -22,7 +22,13 @@
 //!   cross the ABI. No structs, no maps — which is why every method takes and
 //!   returns a JSON string, as SPEC section 6 describes.
 
-use collect_core_logic::{api, session::Session};
+use collect_core_logic::{api, session::Session, store::DocumentStore};
+
+// The real Logos Storage client. Kept in its own file because it is the only
+// thing here that talks to another module, and because it is the one part of
+// this crate that can be compiled outside the Nix build (it does not touch
+// the generated scaffold) — see its own docs.
+mod storage;
 
 /// Collect's core: documents, signing, validation, media and indexing.
 pub trait CollectCoreModule: Send + 'static {
@@ -100,6 +106,10 @@ pub trait CollectCoreModule: Send + 'static {
     /// fields, rows from the submissions this node holds.
     fn results_list(&mut self, request: String) -> String;
 
+    /// Try again to put an experiment manifest on Logos Storage, after a
+    /// `storage_timeout` or `storage_rejected`.
+    fn experiments_publish(&mut self, request: String) -> String;
+
     /// Call any method by its SPEC section 6 name, e.g. `submissions.validate`.
     /// Lets the UI hold one call site, and lets `logoscore call` reach a method
     /// this trait has not named yet.
@@ -160,10 +170,17 @@ impl CollectCoreModule for Collect {
         // Reported rather than assumed: the UI can disable creating before
         // the key exists instead of failing at the call.
         let can_sign = self.session().can_sign();
+        let can_publish = self.session().can_publish();
+        let store = self.session().store_description();
         let base = api::session_capabilities("{}");
         match serde_json::from_str::<serde_json::Value>(&base) {
             Ok(mut v) => {
                 v["data"]["signing"] = serde_json::Value::Bool(can_sign);
+                v["data"]["publishing"] = serde_json::Value::Bool(can_publish);
+                v["data"]["store"] = match store {
+                    Some(d) => serde_json::Value::String(d),
+                    None => serde_json::Value::Null,
+                };
                 v.to_string()
             }
             Err(_) => base,
@@ -255,6 +272,10 @@ impl CollectCoreModule for Collect {
         self.session().results(&request)
     }
 
+    fn experiments_publish(&mut self, request: String) -> String {
+        self.session().publish_now(&request)
+    }
+
     fn call(&mut self, method: String, request: String) -> String {
         // The stateful methods live on Session, which api::dispatch cannot
         // reach — it only knows the pure functions. Routing them here is what
@@ -268,6 +289,7 @@ impl CollectCoreModule for Collect {
             "experiments.create" => self.session().create(&request, now),
             "protocols.saveDraft" => self.session().save_protocol(&request, now),
             "results.list" => self.session().results(&request),
+            "experiments.publish" => self.session().publish_now(&request),
             _ => api::dispatch(&method, &request),
         }
     }
@@ -280,6 +302,19 @@ impl CollectCoreModule for Collect {
         match self.session().attach_identity(&ctx.instance_persistence_path) {
             Ok(public) => eprintln!("collect_core: signing as {public}"),
             Err(e) => eprintln!("collect_core: no signing key: {e}"),
+        }
+
+        // Storage is attached the same way, and separately: a node that can
+        // sign but cannot publish still works — documents are kept locally
+        // and the UI says they have no address yet — so a Storage failure
+        // must not take signing down with it.
+        let scratch = std::path::Path::new(&ctx.instance_persistence_path).join("uploads");
+        match storage::LogosStorage::connect(&scratch) {
+            Ok(store) => {
+                eprintln!("collect_core: publishing to {}", store.describe());
+                self.session().attach_store(Box::new(store));
+            }
+            Err(e) => eprintln!("collect_core: not publishing: {e}"),
         }
     }
 }
