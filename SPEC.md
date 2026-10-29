@@ -68,11 +68,11 @@ Delivery Store keeps messages only temporarily, which is why submitters re-annou
 
 ### 3.3 Creator: receive, view and export
 For each `submission` announcement, the creator node:
-1. fetches the CID (gives up after 10 min, retries on the next announcement). Storage takes no timeout parameter, so this is our own timer waiting on `storageDownloadDone`;
+1. fetches the CID. Verified: `downloadToUrl` **is** asynchronous and completes on `storageDownloadDone`, whose payload carries no CID — only `success`, `sessionId` and `error` — so the fetch is keyed on the session id, which the contract says equals the CID (`docs/api-verification.md` round 4);
 2. checks the signature, schema, protocol id and version, field validation (§4), media CIDs fetchable, sizes;
 3. checks the time window: the receive time is between `starts_at` and `ends_at`. If drafts are allowed, it also accepts a receive time up to 7 days after `ends_at` when `submitted_at` is inside the window;
 4. checks the rate limit (200 per submitter key per day, configurable) and hidden keys;
-5. pins the submission and its media, appends the entry to the current index page, publishes a new page CID on change (batched every 60 s), and sends a `receipt`.
+5. keeps the submission and its media, appends the entry to the current index page, publishes the changed page, re-signs the manifest to point at it, and sends a `receipt`. **Not batched:** each accepted submission publishes immediately. Batching would hold a receipt back for up to a minute to save a CID, and the receipt is what the submitter is waiting on. There is also **no pin** — keeping a document means the bytes are in local storage, `remove()` is never called, and `advertise` stays on (§2).
 
 Invalid submissions are ignored and logged locally; they are never added to the index.
 
@@ -111,7 +111,46 @@ Every field has `key` (stable, `^[a-z][a-z0-9_]{0,39}$`), `label`, optional `hel
 
 ---
 
-## 6. `collect_core` API (proposed)
+## 6. `collect_core` API
+
+The table at the end of this section is the **original proposal**. What is
+built differs, and where it differs the built names win. The shipped surface,
+all through one `call(method, request)` entry point plus the typed trait
+methods beside it:
+
+| Area | Built |
+| --- | --- |
+| Session | `session.capabilities` → `{signing, publishing, store, …}` |
+| Identity | `identity.me` → `{key, signing}` |
+| Experiments | `experiments.list`, `experiments.get {experimentId}`, `experiments.create {title, description, startsAt, endsAt, timezone, creatorName}`, `experiments.update {experimentId, …}`, `experiments.publish {experimentId}` (retry an upload), `experiments.open {link}`, `experiments.parseLink` |
+| Protocols | `protocols.get`, `protocols.saveDraft`, `protocols.validateDraft` |
+| Submissions | `submissions.validate`, `submissions.prepareValues`, `submissions.processMedia` |
+| Index | `index.accept`, `index.page` |
+| Results | `results.list {experimentId, protocolId}`, `results.export {experimentId, protocolId, format, includeMedia}` → `{path, rows, bytes, media}` |
+| Moderation | `submitters.hide {experimentId, submitter}`, `submitters.show {…}` |
+| Delivery | `delivery.status`, `delivery.drain`, `delivery.publishHead {experimentId}`, `delivery.announceSubmission {experimentId, cid, protocolId, version}`, `delivery.deliver {topic, messageHash, payload, source}` |
+| Geo | `geo.round` |
+
+Differences worth naming:
+
+- **`experiments.publish` is a retry, not the publish step.** Creating an
+  experiment uploads it; `publish` exists because `storage_timeout` and
+  `storage_rejected` are retryable and one bad moment should not leave a
+  signed, valid experiment permanently unaddressable.
+- **Hiding is `submitters.hide`**, not `results.hideSubmitter`: it rewrites
+  the index, which is not a property of a results view.
+- **`results.export` returns a path, not a job.** It is fast enough to be
+  synchronous for the sizes involved, and the path is what the UI needs —
+  the QML side has no filesystem, so core writing the file is the only way a
+  creator ends up with one.
+- **No `experiments.listMine` / `listJoined`.** One `experiments.list`
+  returns cards carrying `mine`, because the dashboard shows both sections
+  from one call and two calls could disagree.
+- **No `protocols.publish` / `setStatus` / `experiments.forget` yet.**
+- **`session.status` is `session.capabilities`**, and it reports what this
+  build can do rather than what the network is doing.
+
+### The original proposal
 
 Same conventions as Open Labbook: `logos.callModule("collect_core", method, [jsonString])` returns `{"ok": true, "data": …}` or `{"ok": false, "error": {"code", "message"}}`. Long jobs return `{job}` and report progress through events.
 
@@ -178,6 +217,14 @@ The UI is a **form renderer** driven by the protocol JSON. The wildlife form in 
 
 ## 9. Open questions
 
+Two raised by wiring Storage and Delivery, 29 October 2026:
+
+| # | Question | State |
+| --- | --- | --- |
+| Q13 | **New.** Where should an export go? | **Open, and currently answered by default.** It is written under the module's `instance_persistence_path`, which is the only directory we are promised is writable — but it is somewhere no one would look, so the UI shows the full path. Writing to `~/Downloads` would be findable and is also a module writing outside its own space without being asked. Needs a decision, possibly a file dialog the host does not currently offer. |
+| Q14 | **New.** Should the creator's node fetch a submission it has not been announced? | **Open.** The index can name a CID this node never fetched (`not_fetched` on the C4 cards). Nothing currently goes and gets them, so a creator who was offline during an announcement sees the count but not the rows until the submitter re-announces. A catch-up pass over the index would fix it. |
+
+
 Answered 28 October 2026 against the published APIs and `lgs basecamp docs`. Evidence and quotes: `docs/api-verification.md`. Nothing below was verified by running a node — Nix was not installed — so items marked **needs a node** are still open.
 
 | # | Question | Status |
@@ -190,7 +237,7 @@ Answered 28 October 2026 against the published APIs and `lgs basecamp docs`. Evi
 | Q6 | Optional always-on **mirror** node (headless `collect_core` that pins and re-publishes the index when the creator is offline) | Not in v1; recommend for any experiment that runs for weeks. Q8 makes this more attractive, since a mirror would also hold durable state. |
 | Q7 | More than one creator per experiment | Not in v1. |
 | Q8 | **New, now mostly answered.** Where does `collect_core` keep state that must survive a relaunch? | `RustModuleContext::instance_persistence_path` — "a writable, per-instance directory, the place to keep a module's on-disk state", read via `context()` from `on_context_ready`. The scrub in `lgs basecamp docs` is `lgs basecamp launch`'s deliberate clean-slate contract, not Basecamp's, so in normal use this persists. What remains is a **testing** problem: §8 test 3 restarts the creator, so hand-launch with `--user-dir` outside the scaffold profile tree. |
-| Q9 | **New.** Does a Basecamp 0.3.0 profile come with a usable RLN membership? | **Open, needs a node, and gates §3.2.** If yes, submitters inherit it and §2 works as written. If no, "any Basecamp user with the link can submit" is false on `logos.test` and v1 has to either drop submitter-side announcements or develop against a preset with RLN off. Acquiring memberships per submitter means testnet tokens, which `CLAUDE.md` rules out for v1. |
+| Q9 | **New.** Does a Basecamp 0.3.0 profile come with a usable RLN membership? | **Still open, but it no longer blocks building, and it is now asked rather than assumed.** `rlnState()` reports `{state, message}` plus `registryId`, `rlnIdentifier` and `epochSizeSec` once a preset has enabled RLN — so the presence of a registry is what says RLN applies, and Collect reads it at startup and before every send. A submitter without a membership gets `rln_not_ready`, which is marked non-retryable and carries the state, so the screen can say what is missing instead of spinning. What is still unknown is the **answer** on a real `logos.test` node: whether a profile inherits a funded membership. Everything up to the send works either way, because a submission is on Storage with a CID before it is announced. |
 | Q10 | Spam: is the per-key rate limit enough, given that anyone can make new keys? | Rate limit plus hide; revisit if abused. (Was Q8.) RLN, if it does apply to submitters, is itself a per-identity rate limit and partly answers this. |
-| Q12 | **New.** Should `collect_ui` be `ui-qml` rather than `ui-qml-backend`? | **Open, needs a decision.** Every piece of logic is already in `collect_core`, so a C++ backend would be a pass-through restating each `collect_core` method as a `SLOT`. The `ui-qml` template would let QML call `logos.callModule("collect_core", method, [json])` directly and delete that layer. Against: `ui-qml-backend` gives process isolation and auto-syncing `PROP`s, which fit S3's progress ladder and C4's summary cards better than polling. `CLAUDE.md` pins `ui-qml-backend`, so this is not a change to make unilaterally. |
+| Q12 | **Decided: stay with `ui-qml-backend`.** | The pass-through turned out to be one `SLOT` — `call(method, request)` — not one per method, so the layer it would delete is about ten lines. Against deleting it: the auto-syncing `PROP`s (`capabilities`, `coreReady`, `documents`) are what make the dashboard populate without a call, and that is also what masked the QtRO async bug for a while. Keeping the pin. |
 | Q11 | **New.** HEIC decoding. | **Open.** The contract allows `image/heic`, but decoding needs a system codec. `collect_core` recognises HEIC and refuses it with its own reason rather than calling it an unknown format. Either find a decoder or drop `image/heic` from the contract. |
