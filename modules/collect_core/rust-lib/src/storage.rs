@@ -54,7 +54,7 @@ const CHUNK_SIZE: i64 = 65536;
 /// was. Failing first means the caller gets a real answer: a retryable
 /// `storage_timeout`, with the document kept and `experiments.publish` able
 /// to try again.
-const UPLOAD_TIMEOUT: Duration = Duration::from_secs(12);
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// How often to look for the upload in `manifests()` while waiting.
 const UPLOAD_POLL: Duration = Duration::from_millis(200);

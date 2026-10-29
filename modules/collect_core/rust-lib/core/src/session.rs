@@ -97,6 +97,9 @@ pub struct Session {
     store: Option<Box<dyn DocumentStore>>,
     /// Upload outcome per document id. See `Publication`.
     publications: BTreeMap<String, Publication>,
+    /// How long the current call may go on spending on uploads. See
+    /// `start_publish_budget`.
+    publish_until: Option<std::time::Instant>,
     /// The host's per-instance directory, once we have been given one. Where
     /// exports are written, because the QML side cannot write files at all
     /// and this is the only place we are promised is writable.
@@ -133,6 +136,7 @@ impl Session {
             identity: None,
             store: None,
             publications: BTreeMap::new(),
+            publish_until: None,
             state_dir: None,
             courier: None,
             seen: delivery::Seen::default(),
@@ -433,6 +437,33 @@ impl Session {
         self.publications.get(id).and_then(Publication::cid)
     }
 
+    /// Give this call a budget for uploading.
+    ///
+    /// One method can touch several documents — saving a form publishes the
+    /// form *and* the re-signed manifest, hiding a submitter publishes every
+    /// changed index page *and* the manifest — and each upload is bounded
+    /// separately. Two eight-second bounds exceed the twenty-second protocol
+    /// timeout on the call the UI is waiting on, and when that passes the UI
+    /// gets no reply at all: no result, no error, a button stuck on
+    /// "Saving…". That is what "forms are not saving, no error" was.
+    ///
+    /// So the whole call gets one budget. Documents that do not fit are kept,
+    /// signed and valid, and reported as retryable — `experiments.publish`
+    /// picks them up — which is the contract a Storage timeout already had.
+    fn start_publish_budget(&mut self) {
+        self.publish_until = Some(std::time::Instant::now() + PUBLISH_BUDGET);
+    }
+
+    /// Whether there is still time to upload within this call.
+    fn may_publish(&self) -> bool {
+        match self.publish_until {
+            Some(until) => std::time::Instant::now() < until,
+            // No budget means a caller that publishes a single document, so
+            // that document's own bound is the whole story.
+            None => true,
+        }
+    }
+
     /// Publish a signed document and remember what happened.
     ///
     /// `None` means no Storage is attached, so nothing was attempted — which
@@ -444,6 +475,14 @@ impl Session {
     /// the empty string would have them overwrite each other.
     fn publish_doc(&mut self, kind: &str, key: &str, doc: &Value) -> Option<Publication> {
         let id = key.to_string();
+        if !self.may_publish() {
+            let outcome = Publication::Failed {
+                code: "storage_timeout".to_string(),
+                message: "not uploaded yet: this call ran out of time. It is saved, and publishing can be retried.".to_string(),
+            };
+            self.publications.insert(id, outcome.clone());
+            return Some(outcome);
+        }
         // Scoped so the immutable borrow of `store` is over before the map is
         // written.
         let result = {
@@ -683,6 +722,7 @@ impl Session {
     /// could never be published cannot enter the list. It is **not** uploaded:
     /// `version` stays 1 and `prev`/`index` null until Storage exists.
     pub fn create(&mut self, raw: &str, now: DateTime<Utc>) -> String {
+        self.start_publish_budget();
         let request: Value = match serde_json::from_str(raw) {
             Ok(v) => v,
             Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
@@ -756,6 +796,7 @@ impl Session {
     /// when they were made and the index that recorded them is published.
     /// Silently dropping them would rewrite history the submitter can see.
     pub fn update(&mut self, raw: &str, now: DateTime<Utc>) -> String {
+        self.start_publish_budget();
         let request: Value = match serde_json::from_str(raw) {
             Ok(v) => v,
             Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
@@ -1708,6 +1749,7 @@ impl Session {
     /// deliberate — a moderation decision nobody can observe is worse than
     /// one they can.
     pub fn set_hidden(&mut self, raw: &str, hide: bool, now: DateTime<Utc>) -> String {
+        self.start_publish_budget();
         let request: Value = match serde_json::from_str(raw) {
             Ok(v) => v,
             Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
@@ -1853,6 +1895,7 @@ impl Session {
     /// document is republished exactly as it stands, so a retry that succeeds
     /// lands on the same CID a first attempt would have.
     pub fn publish_now(&mut self, raw: &str) -> String {
+        self.start_publish_budget();
         let request: Value = match serde_json::from_str(raw) {
             Ok(v) => v,
             Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
@@ -1891,6 +1934,7 @@ impl Session {
     /// the renderer could not draw is rejected here rather than on the
     /// submitter's screen.
     pub fn save_protocol(&mut self, raw: &str, now: DateTime<Utc>) -> String {
+        self.start_publish_budget();
         let request: Value = match serde_json::from_str(raw) {
             Ok(v) => v,
             Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
@@ -2020,6 +2064,13 @@ impl Session {
         api::envelope_ok(data)
     }
 }
+
+/// How long one call may spend uploading, across every document it touches.
+///
+/// Comfortably inside the twenty-second protocol default, so the UI always
+/// gets an answer: a partial publish it can retry beats a reply that never
+/// comes.
+const PUBLISH_BUDGET: std::time::Duration = std::time::Duration::from_secs(14);
 
 /// How much export text travels back to the UI for preview. Above this the
 /// path is all it gets: half a CSV looks exactly like a whole one.
@@ -2223,6 +2274,7 @@ mod tests {
             identity: None,
             store: None,
             publications: BTreeMap::new(),
+            publish_until: None,
             state_dir: None,
             courier: None,
             seen: delivery::Seen::default(),
@@ -3503,6 +3555,62 @@ mod tests {
         assert_ne!(s.submissions[0]["submitter"]["key"], json!(public));
     }
 
+    #[test]
+    fn a_call_that_runs_out_of_time_keeps_the_document_and_offers_a_retry() {
+        // Saving a form publishes two documents, each separately bounded.
+        // Together they could outlast the protocol timeout on the call the UI
+        // is waiting on, and then the UI gets no reply at all — no result, no
+        // error. Running out of budget has to be an answer, not a hang.
+        let scratch = Scratch::new("budget");
+        let mut s = publishing_in(&scratch);
+        let made = data(&s.create(
+            &create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
+            at("2026-10-28T08:00:00Z"),
+        ));
+        let id = made["experiment"]["id"].as_str().unwrap().to_string();
+        assert_eq!(made["published"], json!(true), "the budget was fresh");
+
+        // Now spend it.
+        s.publish_until = Some(std::time::Instant::now());
+        let doc = made["experiment"].clone();
+        let outcome = s.publish_doc("experiment", &id, &doc).expect("a store is attached");
+        assert!(matches!(outcome, Publication::Failed { .. }), "{outcome:?}");
+        assert_eq!(s.publish_report(&id)["published"], json!(false));
+        assert_eq!(s.publish_report(&id)["publish_error"]["code"], json!("storage_timeout"));
+
+        // The experiment is still here, and publishing again works once the
+        // budget is fresh.
+        assert_eq!(data(&s.list(at("2026-10-28T08:00:00Z")))["experiments"].as_array().unwrap().len(), 1);
+        let retried = data(&s.publish_now(&json!({ "experimentId": id }).to_string()));
+        assert_eq!(retried["published"], json!(true), "{retried}");
+    }
+
+    #[test]
+    fn saving_a_form_answers_even_when_storage_is_unusable() {
+        // The shape of the failure the budget exists for: the call returns a
+        // result rather than nothing.
+        let scratch = Scratch::new("budgetform");
+        let mut s = empty_in(&scratch);
+        s.attach_store(Box::new(crate::store::MemoryStore::failing(
+            StoreError::Timeout("no completion".into()),
+        )));
+        let now = at("2026-10-28T08:00:00Z");
+        let made = data(&s.create(&create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"), now));
+        let id = made["experiment"]["id"].as_str().unwrap().to_string();
+
+        let saved = data(&s.save_protocol(&draft_for(&id), now));
+        // Saved locally, honestly unpublished.
+        assert_eq!(saved["saved"], json!(true), "{saved}");
+        assert_eq!(saved["published"], json!(false));
+        assert_eq!(
+            data(&s.get(&json!({ "experimentId": id }).to_string()))["protocols"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
     /// A store two owners can look at: the session takes a `Box`, and a test
     /// that wants to inspect what landed needs its own handle.
     struct SharedStore(std::sync::Arc<crate::store::MemoryStore>);
@@ -3796,6 +3904,7 @@ mod tests {
             identity: None,
             store: None,
             publications: BTreeMap::new(),
+            publish_until: None,
             state_dir: None,
             courier: None,
             seen: delivery::Seen::default(),
@@ -3822,6 +3931,7 @@ mod tests {
             identity: None,
             store: None,
             publications: BTreeMap::new(),
+            publish_until: None,
             state_dir: None,
             courier: None,
             seen: delivery::Seen::default(),
@@ -3935,6 +4045,7 @@ mod tests {
             identity: None,
             store: None,
             publications: BTreeMap::new(),
+            publish_until: None,
             state_dir: None,
             courier: None,
             seen: delivery::Seen::default(),
