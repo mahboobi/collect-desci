@@ -1,0 +1,29 @@
+# Compiles collect_core's Storage and Delivery clients against the staged
+# Logos SDK, outside the Nix module build.
+#
+# Why this exists: `rust-lib` cannot be built by cargo at all, because it
+# include!s the scaffold the builder generates. Its two client files have no
+# such dependency, so they can be compiled here — which turns "wrong SDK
+# method name" and "wrong event shape" from a ten-minute `nix build` failure
+# into a two-second one. All three storage_module contract mistakes in
+# docs/api-verification.md round 4 were caught this way.
+#
+# Not a workspace member of anything: it reaches into two crates by path and
+# exists only to typecheck them.
+[package]
+name = "collect-clients-check"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+serde_json = "1"
+collect_core_logic = { path = "../../modules/collect_core/rust-lib/core" }
+# The symlink the builder leaves behind after
+#   nix build github:logos-co/logos-module-builder/0.3.0#rust-sdk-src \
+#     -o logos-rust-sdk-src
+# in modules/collect_core. Same revision the code generator comes from, so
+# there is no generator/runtime skew here either.
+logos-rust-sdk = { path = "../../modules/collect_core/logos-rust-sdk-src" }
