@@ -79,7 +79,9 @@ is not copied. See `docs/api-verification.md` round 3.
   editing details) makes a **new version**: bump `version`, set `prev` to the
   CID the old version was published to, re-sign, re-validate, re-publish.
   `Session::reseal` is the only place that does this.
-- Tests: schema validation of examples, signing and verification, metadata stripping, rounding, index paging, window checks, rate limit. Run `python3 tools/validate.py`, `tools/cargo.sh test` in `modules/collect_core/rust-lib/core`, and `modules/collect_ui/tests/run.sh` in CI. `tools/cargo.sh` exists because `~/.rustup` has no default toolchain; it pins the same cargo/rustc the Nix module build uses.
+- Tests: schema validation of examples, signing and verification, metadata stripping, rounding, index paging, window checks, rate limit. Run the validator through nix, since the system python has no `jsonschema`:
+  `nix-shell -p 'python3.withPackages (ps: [ ps.jsonschema ])' --run 'python3 tools/validate.py'`.
+  Then `tools/cargo.sh test` in `modules/collect_core/rust-lib/core`, and `modules/collect_ui/tests/run.sh` in CI. `tools/cargo.sh` exists because `~/.rustup` has no default toolchain; it pins the same cargo/rustc the Nix module build uses.
 
 ## Do not
 

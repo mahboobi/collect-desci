@@ -310,6 +310,9 @@ impl Session {
             "protocol": { "id": protocol_id, "name": protocol.get("name").and_then(Value::as_str).unwrap_or("") },
             "columns": columns,
             "rows": rows,
+            // The keys themselves, not just the count: without them the UI
+            // can say someone is hidden but offers no way to undo it.
+            "hidden_keys": hidden,
             "summary": {
                 "shown": rows.len(),
                 "indexed": indexed,
@@ -2706,6 +2709,8 @@ mod tests {
         let after = data(&s.results(&results_request()));
         assert_eq!(after["rows"], json!([]));
         assert_eq!(after["summary"]["hidden"], json!(2));
+        // The keys travel too, so the UI can offer to undo it.
+        assert!(after["hidden_keys"].as_array().unwrap().contains(&json!(submitter)));
         assert_eq!(after["summary"]["shown"], json!(0));
     }
 

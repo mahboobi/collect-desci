@@ -23,6 +23,7 @@ Flickable {
     signal editProtocol(string protocolId)
     signal openResults(string protocolId)
     signal addProtocol()
+    signal editExperiment()
     signal back()
 
     // The forms are behind an explicit step. Someone opening a link is
@@ -66,15 +67,46 @@ Flickable {
             }
         }
 
-        Text {
+        Row {
             width: parent.width
-            wrapMode: Text.Wrap
-            text: screen.experiment ? screen.experiment.title : ""
-            font.family: Theme.sans
-            font.pixelSize: Theme.pageTitle
-            font.weight: Theme.semibold
-            font.letterSpacing: Theme.titleSpacing
-            color: Theme.ink
+            spacing: Theme.s12
+
+            Text {
+                width: parent.width - (editDetails.visible ? editDetails.width + Theme.s12 : 0)
+                wrapMode: Text.Wrap
+                text: screen.experiment ? screen.experiment.title : ""
+                font.family: Theme.sans
+                font.pixelSize: Theme.pageTitle
+                font.weight: Theme.semibold
+                font.letterSpacing: Theme.titleSpacing
+                color: Theme.ink
+            }
+
+            Button {
+                id: editDetails
+                visible: screen.mine
+                anchors.top: parent.top
+                height: Theme.chipHeight
+                leftPadding: Theme.s14
+                rightPadding: Theme.s14
+                text: "Edit details"
+                Accessible.name: "Edit this experiment's details"
+                onClicked: screen.editExperiment()
+                contentItem: Text {
+                    text: editDetails.text
+                    font.family: Theme.sans
+                    font.pixelSize: Theme.small
+                    font.weight: Theme.medium
+                    color: Theme.accent
+                    verticalAlignment: Text.AlignVCenter
+                }
+                background: Rectangle {
+                    radius: Theme.rPill
+                    color: editDetails.down ? Theme.surfaceSunken : "transparent"
+                    border.width: 1
+                    border.color: Theme.line
+                }
+            }
         }
 
         // ---- who, and when ----

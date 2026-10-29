@@ -17,11 +17,22 @@ Flickable {
     /// The results.list payload: protocol, columns, rows, summary.
     required property var results
 
+    /// The results.export payload, once one has been written.
+    property var exportResult: null
+    /// True while an export or a hide is in flight, so the buttons cannot be
+    /// pressed twice.
+    property bool busy: false
+
     signal back()
+    signal exportRequested(string format, bool includeMedia)
+    signal hideSubmitter(string key)
+    signal showSubmitter(string key)
 
     readonly property var columns: screen.results && screen.results.columns ? screen.results.columns : []
     readonly property var rows: screen.results && screen.results.rows ? screen.results.rows : []
     readonly property var summary: screen.results && screen.results.summary ? screen.results.summary : ({})
+    readonly property var hiddenKeys: screen.results && screen.results.hidden_keys
+                                      ? screen.results.hidden_keys : []
 
     // Each column gets the same width; the row scrolls sideways if needed.
     readonly property int columnWidth: 160
@@ -240,15 +251,48 @@ Flickable {
                                     color: Theme.ink
                                 }
 
-                                Text {
+                                Row {
                                     width: parent.width
-                                    elide: Text.ElideRight
-                                    text: (dataRow.modelData.submitted_at
-                                           ? dataRow.modelData.submitted_at.slice(0, 16).replace("T", " ") : "")
-                                          + " \u00b7 v" + dataRow.modelData.version
-                                    font.family: Theme.mono
-                                    font.pixelSize: Theme.meta
-                                    color: Theme.ink3
+                                    spacing: Theme.s8
+
+                                    Text {
+                                        width: parent.width - hideButton.width - Theme.s8
+                                        elide: Text.ElideRight
+                                        text: (dataRow.modelData.submitted_at
+                                               ? dataRow.modelData.submitted_at.slice(0, 16).replace("T", " ") : "")
+                                              + " \u00b7 v" + dataRow.modelData.version
+                                        font.family: Theme.mono
+                                        font.pixelSize: Theme.meta
+                                        color: Theme.ink3
+                                    }
+
+                                    // Hiding drops the rows from the index. It
+                                    // is not deletion and does not claim to
+                                    // be: the documents are published and
+                                    // cannot be recalled.
+                                    Button {
+                                        id: hideButton
+                                        height: Theme.chipHeight
+                                        leftPadding: Theme.s8
+                                        rightPadding: Theme.s8
+                                        enabled: !screen.busy
+                                        text: "Hide"
+                                        Accessible.name: "Hide this submitter's results"
+                                        onClicked: screen.hideSubmitter(dataRow.modelData.submitter)
+                                        contentItem: Text {
+                                            text: hideButton.text
+                                            font.family: Theme.sans
+                                            font.pixelSize: Theme.meta
+                                            color: Theme.ink3
+                                            verticalAlignment: Text.AlignVCenter
+                                        }
+                                        background: Rectangle {
+                                            radius: Theme.rPill
+                                            color: hideButton.down ? Theme.surfaceSunken : "transparent"
+                                            border.width: 1
+                                            border.color: Theme.line
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -287,13 +331,186 @@ Flickable {
             }
         }
 
-        Text {
+        // ---- hidden submitters ----
+        //
+        // Listed so hiding can be undone. Without this the creator can hide
+        // someone and then has no way to find them again.
+        Column {
+            visible: screen.hiddenKeys.length > 0
             width: parent.width
-            wrapMode: Text.Wrap
-            text: "Export and hiding a submitter are not built yet."
-            font.family: Theme.sans
-            font.pixelSize: Theme.meta
-            color: Theme.ink3
+            spacing: Theme.s8
+
+            Text {
+                text: "Hidden"
+                font.family: Theme.sans
+                font.pixelSize: Theme.sectionTitle
+                font.weight: Theme.semibold
+                color: Theme.ink
+            }
+
+            Text {
+                width: parent.width
+                wrapMode: Text.Wrap
+                text: "Their submissions stay on Logos Storage \u2014 hiding only removes them from this index, results and exports."
+                font.family: Theme.sans
+                font.pixelSize: Theme.meta
+                color: Theme.ink3
+            }
+
+            Repeater {
+                model: screen.hiddenKeys
+
+                delegate: Row {
+                    id: hiddenRow
+                    required property string modelData
+                    spacing: Theme.s12
+
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: Core.fingerprint(hiddenRow.modelData)
+                        font.family: Theme.mono
+                        font.pixelSize: Theme.small
+                        color: Theme.ink2
+                    }
+
+                    Button {
+                        id: showButton
+                        height: Theme.chipHeight
+                        leftPadding: Theme.s12
+                        rightPadding: Theme.s12
+                        enabled: !screen.busy
+                        text: "Show again"
+                        Accessible.name: "Show this submitter's results again"
+                        onClicked: screen.showSubmitter(hiddenRow.modelData)
+                        contentItem: Text {
+                            text: showButton.text
+                            font.family: Theme.sans
+                            font.pixelSize: Theme.meta
+                            color: Theme.ink2
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                        background: Rectangle {
+                            radius: Theme.rPill
+                            color: showButton.down ? Theme.surfaceSunken : "transparent"
+                            border.width: 1
+                            border.color: Theme.line
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- export ----
+        Column {
+            width: parent.width
+            spacing: Theme.s12
+
+            Text {
+                text: "Export"
+                font.family: Theme.sans
+                font.pixelSize: Theme.sectionTitle
+                font.weight: Theme.semibold
+                color: Theme.ink
+            }
+
+            CheckRow {
+                id: withMedia
+                width: parent.width
+                label: "Include the photos"
+                hint: "Fetches every photo named in the table and writes them beside the file."
+            }
+
+            Row {
+                spacing: Theme.s12
+
+                Repeater {
+                    model: [
+                        { format: "csv", label: "Export CSV" },
+                        { format: "json", label: "Export JSON" }
+                    ]
+
+                    delegate: Button {
+                        id: exportButton
+                        required property var modelData
+                        height: Theme.touchTarget
+                        leftPadding: Theme.s20
+                        rightPadding: Theme.s20
+                        enabled: !screen.busy && screen.rows.length > 0
+                        text: exportButton.modelData.label
+                        Accessible.name: exportButton.modelData.label
+                        onClicked: screen.exportRequested(exportButton.modelData.format,
+                                                          withMedia.on)
+                        contentItem: Text {
+                            text: exportButton.text
+                            font.family: Theme.sans
+                            font.pixelSize: Theme.small
+                            font.weight: Theme.semibold
+                            color: exportButton.enabled ? Theme.textOnAccent : Theme.ink3
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                        background: Rectangle {
+                            radius: Theme.rControl
+                            color: !exportButton.enabled
+                                   ? Theme.surfaceSunken
+                                   : (exportButton.down ? Theme.accentHover : Theme.accent)
+                        }
+                    }
+                }
+            }
+
+            // Where it went. The QML side cannot open a file manager, so the
+            // path is the deliverable: it is shown in full and selectable.
+            Column {
+                visible: screen.exportResult !== null
+                width: parent.width
+                spacing: Theme.s4
+
+                Text {
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    text: screen.exportResult
+                          ? screen.exportResult.rows + " row(s) written to"
+                          : ""
+                    font.family: Theme.sans
+                    font.pixelSize: Theme.small
+                    color: Theme.ink2
+                }
+
+                TextEdit {
+                    width: parent.width
+                    readOnly: true
+                    selectByMouse: true
+                    wrapMode: TextEdit.WrapAnywhere
+                    text: screen.exportResult ? screen.exportResult.path : ""
+                    font.family: Theme.mono
+                    font.pixelSize: Theme.meta
+                    color: Theme.ink
+                    Accessible.name: "The path the export was written to"
+                }
+
+                Text {
+                    visible: screen.exportResult && screen.exportResult.media
+                             && screen.exportResult.media.requested === true
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    text: {
+                        if (!screen.exportResult || !screen.exportResult.media)
+                            return "";
+                        var m = screen.exportResult.media;
+                        var line = m.written + " of " + m.wanted + " photo(s) fetched";
+                        if (m.failed && m.failed.length > 0)
+                            line += " \u2014 " + m.failed.length + " could not be fetched";
+                        return line + ".";
+                    }
+                    font.family: Theme.sans
+                    font.pixelSize: Theme.meta
+                    color: screen.exportResult && screen.exportResult.media
+                           && screen.exportResult.media.failed
+                           && screen.exportResult.media.failed.length > 0
+                           ? Theme.amber : Theme.ink3
+                }
+            }
         }
     }
 }

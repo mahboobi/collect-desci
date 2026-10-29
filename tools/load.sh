@@ -52,6 +52,31 @@ echo "==> building module packages"
 CORE="$(cd "$ROOT/modules/collect_core" && nix build .#lgx --no-link --print-out-paths | tail -1)"
 UI="$(cd "$ROOT/modules/collect_ui" && nix build .#lgx --no-link --print-out-paths | tail -1)"
 
+# Storage and Delivery are NOT in the scaffold-built basecamp. It ships four
+# core modules — capability_module, modules_state, package_manager,
+# package_downloader — and nothing else. The installed /Applications build does
+# have storage_module, but that is the non-dev variant and cannot be mixed with
+# ours (see VARIANTS above), so they are built from their own flakes for the
+# dev variant and installed like any other module.
+#
+# COLLECT_NO_NETWORK=1 skips them, for working on the UI without a node.
+PLATFORM_MODULES=()
+if [ "${COLLECT_NO_NETWORK:-0}" != "1" ]; then
+  echo "==> building platform modules (storage, delivery)"
+  for flake in logos-storage-module logos-delivery-module; do
+    # --accept-flake-config: the Logos binary cache is declared in their
+    # flakes as extra-trusted-public-keys, which nix refuses silently for a
+    # user who is not in trusted-users. Without the cache these build from
+    # source, which takes hours rather than minutes.
+    out="$(nix build "github:logos-co/$flake#lgx" --no-link --print-out-paths              --accept-flake-config 2>/dev/null | tail -1)" || out=""
+    if [ -n "$out" ]; then
+      PLATFORM_MODULES+=("$out")
+    else
+      echo "    WARNING: $flake did not build; Collect will run without it" >&2
+    fi
+  done
+fi
+
 if [ "$FRESH" = "--fresh" ]; then
   echo "==> wiping installed modules in $PROFILE"
   rm -rf "$USERDIR/modules" "$USERDIR/plugins"
@@ -59,7 +84,11 @@ if [ "$FRESH" = "--fresh" ]; then
 fi
 
 echo "==> installing"
-for f in "$CORE"/*.lgx "$UI"/*.lgx; do
+INSTALL=("$CORE"/*.lgx "$UI"/*.lgx)
+for m in "${PLATFORM_MODULES[@]+"${PLATFORM_MODULES[@]}"}"; do
+  INSTALL+=("$m"/*.lgx)
+done
+for f in "${INSTALL[@]}"; do
   "$LGPM" --modules-dir "$USERDIR/modules" --ui-plugins-dir "$USERDIR/plugins" \
           install --file "$f"
 done

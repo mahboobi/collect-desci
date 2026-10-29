@@ -1,4 +1,9 @@
-// C2 — experiment details.
+// C2 — experiment details, for a new experiment and for editing one.
+//
+// One screen for both, because the fields and every rule over them are the
+// same: a title length accepted on create and refused on edit would be a bug
+// only an editing user ever hits. `existing` switches the wording and
+// prefills; which method the payload goes to is the router's business.
 //
 // SPEC 3.1: title, description, start and end date, time zone, and the end
 // must not be before the start — inline error, Save disabled.
@@ -18,6 +23,13 @@ Flickable {
     // Per-field complaints from collect_core, keyed by field name.
     property var problems: ({})
     property bool saving: false
+    /// The experiment being edited, or null when creating one.
+    property var existing: null
+    /// Warnings collect_core returned about the edit — notably that the new
+    /// dates exclude submissions it has already accepted.
+    property var warnings: []
+
+    readonly property bool editing: screen.existing !== null
 
     signal save(string json)
     signal cancelled()
@@ -37,6 +49,26 @@ Flickable {
         return screen.problems && screen.problems[field] ? screen.problems[field] : "";
     }
 
+    /// Fill the form from `existing`. Called once, on load: binding the
+    /// fields to it instead would make them read-only in practice, since
+    /// every keystroke would be overwritten by the binding.
+    function prefill() {
+        if (!screen.existing)
+            return;
+        titleField.text = screen.existing.title ? screen.existing.title : "";
+        descriptionField.text = screen.existing.description ? screen.existing.description : "";
+        // `stamp` is derived; the day is what the picker owns. Taking the
+        // first ten characters is the whole date — the stored value is always
+        // RFC 3339, so the offset and time are rebuilt from `endOfDay`.
+        startPicker.isoDate = screen.existing.starts_at
+                              ? screen.existing.starts_at.slice(0, 10) : "";
+        endPicker.isoDate = screen.existing.ends_at
+                            ? screen.existing.ends_at.slice(0, 10) : "";
+        timezoneField.text = screen.existing.timezone ? screen.existing.timezone : "";
+    }
+
+    Component.onCompleted: screen.prefill()
+
     Column {
         id: body
         x: Theme.s32
@@ -45,7 +77,7 @@ Flickable {
         spacing: Theme.s24
 
         Text {
-            text: "New experiment"
+            text: screen.editing ? "Edit experiment" : "New experiment"
             font.family: Theme.sans
             font.pixelSize: Theme.pageTitle
             font.weight: Theme.semibold
@@ -54,7 +86,34 @@ Flickable {
         }
 
         PublicNotice {
-            detail: "Everything in this experiment, including every submission, is stored publicly on Logos Storage and cannot be deleted."
+            detail: screen.editing
+                    ? "Saving publishes a new version of this experiment. The version it replaces stays on Logos Storage and cannot be deleted."
+                    : "Everything in this experiment, including every submission, is stored publicly on Logos Storage and cannot be deleted."
+        }
+
+        // What the edit would do to submissions already accepted. Shown
+        // after the fact because only collect_core knows what it holds, and
+        // it warns rather than refusing: those submissions were valid when
+        // they were made.
+        Column {
+            visible: screen.warnings.length > 0
+            width: parent.width
+            spacing: Theme.s4
+
+            Repeater {
+                model: screen.warnings
+
+                delegate: Text {
+                    id: warningLine
+                    required property var modelData
+                    width: screen.width - Theme.s32 * 2
+                    wrapMode: Text.Wrap
+                    text: warningLine.modelData.message
+                    font.family: Theme.sans
+                    font.pixelSize: Theme.small
+                    color: Theme.amber
+                }
+            }
         }
 
         // ---- title ----
@@ -247,17 +306,30 @@ Flickable {
                 leftPadding: Theme.s28
                 rightPadding: Theme.s28
                 enabled: screen.complete && !screen.saving
-                text: screen.saving ? "Saving\u2026" : "Create experiment"
-                Accessible.name: "Create this experiment"
+                text: screen.saving
+                      ? "Saving\u2026"
+                      : (screen.editing ? "Save changes" : "Create experiment")
+                Accessible.name: screen.editing
+                                 ? "Save changes to this experiment"
+                                 : "Create this experiment"
                 onClicked: {
                     screen.saving = true;
-                    screen.save(JSON.stringify({
+                    var payload = {
                         title: titleField.text.trim(),
                         description: descriptionField.text,
                         startsAt: startPicker.stamp,
                         endsAt: endPicker.stamp,
                         timezone: timezoneField.text.trim()
-                    }));
+                    };
+                    if (screen.editing) {
+                        payload.experimentId = screen.existing.id;
+                        // The creator's own display name travels with the
+                        // edit; the key does not, and collect_core refuses to
+                        // change it regardless of what is sent.
+                        payload.creatorName = screen.existing.creator
+                                              ? screen.existing.creator.name : "";
+                    }
+                    screen.save(JSON.stringify(payload));
                 }
 
                 contentItem: Text {
