@@ -38,6 +38,9 @@ Item {
     property bool resultsBusy: false
     /// Warnings collect_core returned about an edit.
     property var editWarnings: []
+    /// Whether the open experiment has a CID yet. The head announcement names
+    /// one, so there is nothing to announce until it does.
+    property bool openPublished: false
 
     // The typed replica for this module's own backend. Null until the view
     // module is ready, so every read is guarded.
@@ -109,6 +112,7 @@ Item {
                 protocol: data.protocols && data.protocols.length > 0 ? data.protocols[0] : null
             });
             Core.heldProtocols = data.protocols ? data.protocols : [];
+            app.openPublished = data.published === true;
             app.page = "detail";
         });
     }
@@ -154,6 +158,35 @@ Item {
                          app.exportResult = null;
                      app.page = "results";
                  });
+    }
+
+    /// Like call(), for work nobody asked for.
+    ///
+    /// A timer firing in the background must not take over the error banner:
+    /// the banner is for things the person just did, and "the manifest has no
+    /// CID yet" on a loop is noise they cannot act on. Failures still go to
+    /// the log, so they are not lost — they are just not shouted.
+    function callQuietly(method, request, onData) {
+        if (!app.ready)
+            return;
+        logos.watch(app.backend.call(method, JSON.stringify(request)), // qmllint disable unqualified
+                    function (reply) {
+                        var envelope;
+                        try {
+                            envelope = JSON.parse(reply);
+                        } catch (e) {
+                            console.warn("collect:", method, "returned no JSON");
+                            return;
+                        }
+                        if (!envelope.ok) {
+                            console.warn("collect:", method,
+                                         envelope.error ? envelope.error.message : "failed");
+                            return;
+                        }
+                        if (onData)
+                            onData(envelope.data);
+                    },
+                    function (error) { console.warn("collect:", method, error); });
     }
 
     /// Hide or show a submitter, then reload the table it changed.
@@ -463,7 +496,7 @@ Item {
         interval: 15000
         repeat: true
         triggeredOnStart: true
-        onTriggered: app.call("delivery.drain", {}, function (data) {
+        onTriggered: app.callQuietly("delivery.drain", {}, function (data) {
             if (data.handled > 0) {
                 app.refreshList();
                 // A submission may have landed in the table on screen.
@@ -483,12 +516,16 @@ Item {
     // Delivery's Store is temporary and a submitter who joins later has no
     // other way to find the newest index.
     Timer {
-        running: app.ready && app.openMine && app.openExperimentId !== ""
+        // Only once the manifest has an address: a head names the manifest's
+        // CID, so announcing one before it has been published would advertise
+        // `logos:pending` to everybody listening.
+        running: app.ready && app.openMine && app.openPublished
+                 && app.openExperimentId !== ""
         interval: 600000
         repeat: true
         triggeredOnStart: true
-        onTriggered: app.call("delivery.publishHead",
-                              { experimentId: app.openExperimentId },
-                              function () {})
+        onTriggered: app.callQuietly("delivery.publishHead",
+                                     { experimentId: app.openExperimentId },
+                                     function () {})
     }
 }
