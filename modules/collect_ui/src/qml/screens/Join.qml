@@ -53,6 +53,24 @@ Flickable {
     signal requestThumbnailPick()
     property bool nativePicker: false
 
+    // ---- rewards ----
+    readonly property var reward: Core.rewardOf(screen.experiment)
+    readonly property bool ended: !!(screen.experiment && screen.experiment.ends_at)
+                                  && screen.nowMs >= Date.parse(screen.experiment.ends_at)
+    property bool rewardBusy: false
+    property var rewardProblems: ({})
+    signal setReward(string amount, int maxPerSubmitter)
+    signal openRewards()
+
+    /// This node's submissions to this experiment (submissions.mine), each
+    /// waiting for the creator's receipt or received.
+    property var mySubmissions: []
+    // What has been typed. LabelledInput's `text` only flows inward, so the
+    // typed value is followed through `edited`; null means untouched.
+    property var typedAmount: null
+    property var typedMax: null
+    property string typedCoverPath: ""
+
     contentWidth: width
     contentHeight: body.implicitHeight + Theme.s48 * 2
     clip: true
@@ -191,6 +209,7 @@ Flickable {
                     label: "Path to an image file"
                     mono: true
                     hint: "This app cannot open a file picker here, so paste the file's full path."
+                    onEdited: function (value) { screen.typedCoverPath = value; }
                 }
 
                 Button {
@@ -200,7 +219,7 @@ Flickable {
                     height: Theme.touchTarget
                     text: "Use"
                     Accessible.name: "Use this image as the cover"
-                    onClicked: screen.pickThumbnail(coverPathInput.text)
+                    onClicked: screen.pickThumbnail(screen.typedCoverPath)
                     background: Rectangle {
                         radius: Theme.rControl
                         color: Theme.surface
@@ -396,6 +415,239 @@ Flickable {
                     border.width: 1
                     border.color: Theme.accent
                 }
+            }
+        }
+
+        // ---- reward ----
+        // Everyone sees the offer; the creator sets it, and pays it here
+        // once the experiment has ended.
+        Rectangle {
+            id: rewardCard
+            objectName: "rewardCard"
+            visible: screen.reward !== null || screen.mine
+            width: parent.width
+            implicitHeight: rewardBody.implicitHeight + Theme.s32
+            radius: Theme.rPanel
+            color: Theme.surface
+            border.width: 1
+            border.color: Theme.line
+
+            Column {
+                id: rewardBody
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: Theme.s16
+                spacing: Theme.s10
+
+                Text {
+                    text: "Reward"
+                    font.family: Theme.sans
+                    font.pixelSize: Theme.overline
+                    font.weight: Theme.semibold
+                    font.letterSpacing: Theme.overlineSpacing
+                    font.capitalization: Font.AllUppercase
+                    color: Theme.ink3
+                }
+
+                Text {
+                    objectName: "rewardTerms"
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    text: screen.reward
+                          ? screen.reward.amount + " " + screen.reward.symbol + " (LEZ testnet) per approved submission, "
+                            + "up to " + screen.reward.max + " per person, paid after the experiment ends."
+                            + (screen.mine ? "" : " To be paid, include your wallet address when you submit.")
+                          : "No reward. You can offer LEZ TestToken for each submission you approve."
+                    font.family: Theme.sans
+                    font.pixelSize: Theme.body
+                    color: Theme.ink
+                }
+
+                // The creator's controls. Locked once anything is paid
+                // (collect_core refuses, and says so).
+                Row {
+                    visible: screen.mine && !screen.ended
+                    spacing: Theme.s12
+
+                    LabelledInput {
+                        id: rewardAmount
+                        width: 200
+                        label: "TestToken per submission"
+                        text: screen.reward ? screen.reward.amount : ""
+                        hint: screen.rewardProblems.amount ? screen.rewardProblems.amount : ""
+                        inputHints: Qt.ImhFormattedNumbersOnly
+                        onEdited: function (value) { screen.typedAmount = value; }
+                    }
+
+                    LabelledInput {
+                        id: rewardMax
+                        width: 160
+                        label: "Most per person"
+                        text: screen.reward ? String(screen.reward.max) : "1"
+                        hint: screen.rewardProblems.maxPerSubmitter ? screen.rewardProblems.maxPerSubmitter : ""
+                        inputHints: Qt.ImhDigitsOnly
+                        onEdited: function (value) { screen.typedMax = value; }
+                    }
+
+                    Button {
+                        id: saveReward
+                        objectName: "saveReward"
+                        anchors.bottom: parent.bottom
+                        anchors.bottomMargin: (rewardAmount.hint !== "" || rewardMax.hint !== "") ? Theme.s24 : 0
+                        height: Theme.touchTarget
+                        leftPadding: Theme.s16
+                        rightPadding: Theme.s16
+                        enabled: !screen.rewardBusy
+                        text: screen.reward ? "Update reward" : "Offer reward"
+                        Accessible.name: text
+                        onClicked: screen.setReward(
+                                       screen.typedAmount !== null ? screen.typedAmount : rewardAmount.text,
+                                       parseInt(screen.typedMax !== null ? screen.typedMax : rewardMax.text, 10) || 0)
+                        contentItem: Text {
+                            text: saveReward.text
+                            font.family: Theme.sans
+                            font.pixelSize: Theme.small
+                            font.weight: Theme.medium
+                            color: Theme.accent
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                        background: Rectangle {
+                            radius: Theme.rControl
+                            color: saveReward.down ? Theme.accentTint : Theme.surface
+                            border.width: 1
+                            border.color: Theme.accent
+                        }
+                    }
+
+                    Button {
+                        id: removeReward
+                        visible: screen.reward !== null
+                        anchors.bottom: saveReward.bottom
+                        height: Theme.touchTarget
+                        leftPadding: Theme.s14
+                        rightPadding: Theme.s14
+                        enabled: !screen.rewardBusy
+                        text: "Remove"
+                        Accessible.name: "Remove the reward"
+                        onClicked: screen.setReward("", 1)
+                        contentItem: Text {
+                            text: removeReward.text
+                            font.family: Theme.sans
+                            font.pixelSize: Theme.small
+                            color: Theme.ink2
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                        background: Rectangle {
+                            radius: Theme.rControl
+                            color: removeReward.down ? Theme.surfaceSunken : "transparent"
+                            border.width: 1
+                            border.color: Theme.line
+                        }
+                    }
+                }
+
+                Text {
+                    visible: screen.mine && screen.reward !== null && !screen.ended
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    text: "Approve submissions in each form's Results. Paying opens here once the experiment ends, "
+                          + "and nothing is sent until you confirm it."
+                    font.family: Theme.sans
+                    font.pixelSize: Theme.meta
+                    color: Theme.ink3
+                }
+
+                Button {
+                    id: payRewards
+                    objectName: "payRewards"
+                    visible: screen.mine && screen.reward !== null && screen.ended
+                    height: Theme.touchTarget
+                    leftPadding: Theme.s24
+                    rightPadding: Theme.s24
+                    text: "Pay rewards\u2026"
+                    Accessible.name: "Review and pay this experiment's rewards"
+                    onClicked: screen.openRewards()
+                    contentItem: Text {
+                        text: payRewards.text
+                        font.family: Theme.sans
+                        font.pixelSize: Theme.body
+                        font.weight: Theme.medium
+                        color: Theme.textOnAccent
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        radius: Theme.rControl
+                        color: payRewards.down ? Theme.accentHover : Theme.accent
+                    }
+                }
+            }
+        }
+
+        // ---- your submissions ----
+        // Only on someone else's experiment: the creator indexes their own
+        // directly and needs no receipt.
+        Column {
+            objectName: "mySubmissions"
+            visible: !screen.mine && screen.mySubmissions.length > 0
+            width: parent.width
+            spacing: Theme.s8
+
+            Text {
+                text: "Your submissions"
+                font.family: Theme.sans
+                font.pixelSize: Theme.sectionTitle
+                font.weight: Theme.semibold
+                color: Theme.ink
+            }
+
+            Repeater {
+                model: screen.mySubmissions
+
+                delegate: Rectangle {
+                    id: sent
+                    required property var modelData
+                    readonly property bool received: modelData.state === "received"
+                    readonly property var form: Core.protocolById(modelData.protocol)
+                    width: body.width
+                    implicitHeight: sentText.implicitHeight + Theme.s24
+                    radius: Theme.rControl
+                    color: Theme.surface
+                    border.width: 1
+                    border.color: Theme.line
+
+                    Text {
+                        id: sentText
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.margins: Theme.s12
+                        wrapMode: Text.Wrap
+                        textFormat: Text.PlainText
+                        text: (sent.form ? sent.form.name : sent.modelData.protocol) + " \u00b7 "
+                              + String(sent.modelData.submitted_at).slice(0, 16).replace("T", " ") + " \u2014 "
+                              + (sent.received
+                                 ? "Received by the creator \u2713"
+                                 : "Waiting for the creator\u2026 announced " + sent.modelData.attempts
+                                   + (sent.modelData.attempts === 1 ? " time" : " times")
+                                   + (sent.modelData.last_error ? ". Last try: " + sent.modelData.last_error : ""))
+                        font.family: Theme.sans
+                        font.pixelSize: Theme.small
+                        color: sent.received ? Theme.accent
+                             : (sent.modelData.last_error ? Theme.amber : Theme.ink2)
+                    }
+                }
+            }
+
+            Text {
+                visible: screen.mySubmissions.some(function (m) { return m.state !== "received"; })
+                width: parent.width
+                wrapMode: Text.Wrap
+                text: "Your answers are signed and saved on Logos Storage already. Collect keeps announcing them, "
+                      + "less often over time, until the creator's Basecamp confirms it has them."
+                font.family: Theme.sans
+                font.pixelSize: Theme.meta
+                color: Theme.ink3
             }
         }
 

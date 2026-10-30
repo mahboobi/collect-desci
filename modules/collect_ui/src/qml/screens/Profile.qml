@@ -32,6 +32,8 @@ Flickable {
     /// is parented to an offscreen window and strands the person outside
     /// basecamp.
     property bool nativePicker: false
+    // The typed fallback path (see LabelledInput: `text` only flows inward).
+    property string typedPath: ""
     signal clearPhoto()
 
     // The edits in progress, keyed like `profile.fields`. Seeded from
@@ -238,6 +240,8 @@ Flickable {
                         label: "Path to an image file"
                         mono: true
                         hint: "This app cannot open a file picker here, so paste the file's full path."
+                        // `text` only flows inward; follow what is typed.
+                        onEdited: function (value) { screen.typedPath = value; }
                     }
 
                     Button {
@@ -247,7 +251,7 @@ Flickable {
                         height: Theme.touchTarget
                         text: "Use"
                         Accessible.name: "Use this image as the profile photo"
-                        onClicked: screen.pickPhoto(pathInput.text, screen.entry("photo").share)
+                        onClicked: screen.pickPhoto(screen.typedPath, screen.entry("photo").share)
                         background: Rectangle {
                             radius: Theme.rControl
                             color: Theme.surface

@@ -27,6 +27,7 @@ Everything is a JSON document on **Logos Storage**, addressed by CID. Documents 
 | `collect/protocol@1` | Creator | id, version, name, instructions, fields, options | No. Edits create a new version; submissions name the version they used. |
 | `collect/submission@1` | Submitter | experiment, protocol id and version, submitter key and optional name, submitted_at, values; media as CIDs; optional public `wallet` (the submitter's own profile address, only when they tick the box on the form; added 30 October 2026). `submissions.submit` takes `includeWallet: bool`; results rows and exports carry `submitter_wallet` | No |
 | `collect/index@1` | Creator | One page (up to 1,000 entries) listing received submissions, hidden keys, and `prev` page CID | No. New pages link back to earlier ones. |
+| `collect/results@1` | Creator | One form's published results: the experiment and the form as signed, every **approved** submission as signed with its CID and received_at, a photo summary (named, held, missing), `prev` (last snapshot), `published_at`. Signed by the experiment's creator, like protocols and index pages. Listed in the manifest's `results` (newest per form). Added 30 October 2026 | No. Pushing again publishes a newer snapshot pointing at the last |
 | Media files | Submitter | Photos, with all metadata removed | No |
 
 **Messaging.** Storage has no network-wide "list" and no "notify" operation, so documents are announced on one **Logos Delivery** content topic per experiment: `/collect/1/exp-<experimentId>/json`. (Verified: `manifests()` does list what the *local* node holds — see `docs/api-verification.md` Q2.) Messages (schemas in `$defs/announcement`):
@@ -122,11 +123,11 @@ methods beside it:
 | --- | --- |
 | Session | `session.capabilities` → `{signing, publishing, store, …}` |
 | Identity | `identity.me` → `{key, signing}` |
-| Experiments | `experiments.list`, `experiments.get {experimentId}`, `experiments.create {title, description, startsAt, endsAt, timezone, creatorName}`, `experiments.update {experimentId, …}`, `experiments.publish {experimentId}` (retry an upload), `experiments.setThumbnail {experimentId, path}` (path or `file://` URL; needs Storage; makes a new version), `experiments.clearThumbnail {experimentId}`, `experiments.open {link}`, `experiments.parseLink`. `list` cards and `get` carry `thumbnail`: a data URI the UI can show, or null when there is none or this node does not hold it yet (the drain fetches missing ones, two per run, and checks each against the manifest's sha256) |
+| Experiments | `experiments.list`, `experiments.get {experimentId}`, `experiments.create {title, description, startsAt, endsAt, timezone, creatorName}`, `experiments.update {experimentId, …}`, `experiments.publish {experimentId}` (retry an upload), `experiments.setThumbnail {experimentId, path}` (path or `file://` URL; needs Storage; makes a new version), `experiments.clearThumbnail {experimentId}`, `experiments.open {link}`, `experiments.parseLink` (live since 30 October 2026: fetches the manifest at the link and every form it lists from Storage, keeps them only if valid and signed by the manifest's creator, then watches the experiment's topic; forms not fetched yet are reported as `missing_forms`). `list` cards and `get` carry `thumbnail`: a data URI the UI can show, or null when there is none or this node does not hold it yet (the drain fetches missing ones, two per run, and checks each against the manifest's sha256) |
 | Protocols | `protocols.get`, `protocols.saveDraft`, `protocols.validateDraft` |
-| Submissions | `submissions.validate`, `submissions.prepareValues`, `submissions.processMedia`, `media.addPhoto {path, maxMbEach}` → `{entry, exif: {location, datetime}, name}` (cleans, puts the cleaned file on Storage, returns the media entry for a photo field; needs Storage) |
+| Submissions | `submissions.mine {experimentId?}` (this node's submissions to others' experiments: `waiting` or `received`), `submissions.validate`, `submissions.prepareValues`, `submissions.processMedia`, `media.addPhoto {path, maxMbEach}` → `{entry, exif: {location, datetime}, name}` (cleans, puts the cleaned file on Storage, returns the media entry for a photo field; needs Storage) |
 | Index | `index.accept`, `index.page` |
-| Results | `results.list {experimentId, protocolId}`, `results.export {experimentId, protocolId, format, includeMedia}` → `{path, rows, bytes, media}` |
+| Results | `results.list {experimentId, protocolId}`, `results.export {experimentId, protocolId, format, includeMedia}` → `{path, rows, bytes, media}`, `results.publish {experimentId, protocolId}` ("Push to Logos Storage": approved rows only; the creator's node first fetches and keeps every photo they name, up to 60 s, listing any it could not; then the snapshot is uploaded and a new manifest version lists it) |
 | Moderation | `submitters.hide {experimentId, submitter}`, `submitters.show {…}` |
 | Delivery | `delivery.status` (includes `connection: {level: online \| degraded \| offline, reason}` for the dashboard dot, from Delivery's `getConnectionStatus`, Storage presence and RLN readiness), `delivery.drain`, `delivery.publishHead {experimentId}`, `delivery.announceSubmission {experimentId, cid, protocolId, version}`, `delivery.deliver {topic, messageHash, payload, source}` |
 | Geo | `geo.round` |
@@ -253,6 +254,19 @@ Opened from **Discussion** on the experiment screen.
 
 ---
 
+
+## 11. Rewards (added 30 October 2026)
+
+An experiment may offer **LEZ TestToken** (LEZ testnet, 10^9 lepta per token) for each submission the creator approves. This lifted the v1 rule of no tokens or payments.
+
+- **The offer is public.** `experiment.reward = {token: "lez:testnet", amount: <lepta, decimal string>, max_per_submitter: 1..1000}`, set with `experiments.setReward {experimentId, amount: "0.0005", maxPerSubmitter}` (empty amount removes it). It makes a new manifest version, so submitters see the terms before taking part. It cannot change once anything has been paid.
+- **Who can be paid.** Submissions that are received (indexed, so they have a CID), from submitters who are not hidden, that the creator approved, whose submitter included a wallet (`submission.wallet`) that decodes to a 32-byte LEZ public account (base58 as LEZ Wallet shows it, or 64 hex). At most `max_per_submitter` per person, counting what was already paid.
+- **Approvals** are the creator's, kept only on their node: `results.setApproval {experimentId, cid, status: approved|rejected|pending}`. Results rows carry `approval` and `paid`.
+- **Paying** happens only after `ends_at`, from the Pay rewards screen. `rewards.plan {experimentId, from?}` returns the payees, the skipped with reasons, the pending count, the total, the payment history, and with `from` that account's balance and whether it covers the total. The creator ticks a confirmation; the UI then calls `rewards.pay {experimentId, from, submitter, cids, amountLepta}` once per payee, in turn. Each call rebuilds the plan and refuses if that row no longer matches.
+- **Exactly once.** Each payout is saved to `state.json` as `sending` before `lez_core.transfer_public` is called, then `sent` (with the transaction hash) or `failed`. A non-failed payout's submissions are never paid again. A `sending` record left by a crash blocks further payments until the creator checks LEZ Wallet and calls `rewards.resolve {experimentId, payoutId, outcome: sent|failed}`. `rewards.refresh` asks `poll_transaction_status` and marks `confirmed`.
+- **The wallet** is `lez_core`'s, the one LEZ Wallet opens. Collect calls it by name (never declared as a dependency, CLAUDE.md 8b), never opens or unlocks it, and never sees a key. Calls: `get_balance(account_hex, true)`, `transfer_public(from_hex, to_hex, amount_le16_hex)` (amount as 16-byte little-endian hex), `poll_transaction_status(tx)`, all from `lez_core` 0.5.1's interface, checked against the installed binary.
+- **Open (Q18):** whether `lez_core` answers `collect_core` without the dependency being declared, the exact shapes of `get_balance` and `transfer_public` replies (both read defensively), and transaction fees. To be checked with a small first payment between the creator's own accounts.
+
 ## 9. Open questions
 
 Raised by the profile and discussion work, 29 October 2026:
@@ -262,6 +276,7 @@ Raised by the profile and discussion work, 29 October 2026:
 | Q15 | Does the Basecamp UI sandbox allow `QtQuick.Dialogs`? | **Open — check in the app.** The photo picker loads through a `Loader`. If the import is refused, the profile screen falls back to a typed file path. **Answered 30 October 2026 (Basecamp 0.3.2):** the QtQuick FileDialog does open, but it is parented to the view's offscreen window, so the person is left outside Basecamp. On macOS the backend now runs the chooser as `osascript` and reactivates Basecamp (`pickImage` / `imagePicked`). The sandbox also refuses `data:` image URLs, so the backend writes every image in a reply into `plugins/collect_ui/cache/` and passes a `file://` URL. |
 | Q16 | What RLN rate limit applies to messages on `logos.test`? | **Open.** Every message and profile announcement uses the sender's RLN quota. If the quota is one message per 600 s epoch, discussion is unusable on testnet. |
 | Q17 | Projects with more than 32 members | **Open.** Only the 32 most recently seen members get a sealed profile. A larger project would need several announcements, or a group key. |
+| Q18 | **New.** Rewards: does `lez_core` answer `collect_core` without being declared, what exactly do `get_balance` and `transfer_public` return, and what does a transfer cost? | Read defensively for now (section 11). Check with a small first payment between the creator's own accounts, then record the answers here. |
 
 Two raised by wiring Storage and Delivery, 29 October 2026:
 
@@ -287,3 +302,8 @@ Answered 28 October 2026 against the published APIs and `lgs basecamp docs`. Evi
 | Q10 | Spam: is the per-key rate limit enough, given that anyone can make new keys? | Rate limit plus hide; revisit if abused. (Was Q8.) RLN, if it does apply to submitters, is itself a per-identity rate limit and partly answers this. |
 | Q12 | **Decided: stay with `ui-qml-backend`.** | The pass-through turned out to be one `SLOT` — `call(method, request)` — not one per method, so the layer it would delete is about ten lines. Against deleting it: the auto-syncing `PROP`s (`capabilities`, `coreReady`, `documents`) are what make the dashboard populate without a call, and that is also what masked the QtRO async bug for a while. Keeping the pin. |
 | Q11 | **New.** HEIC decoding. | **Open.** The contract allows `image/heic`, but decoding needs a system codec. `collect_core` recognises HEIC and refuses it with its own reason rather than calling it an unknown format. Either find a decoder or drop `image/heic` from the contract. |
+
+### Submitting to someone else's experiment (built 30 October 2026)
+
+`submissions.submit` on an experiment this node did not create puts the submission in a saved **outbox** and announces it at once. The drain re-announces anything still `waiting` after 3 minutes, then 6, 12 and so on, up to once an hour, until the creator's receipt arrives; the outbox survives restarts (`state.json`). Only a receipt from the experiment's creator settles an entry, the same rule heads already follow. A submission that cannot be announced yet (no Delivery, no RLN membership) is not a failed submission: it is signed and on Storage, and waits. The detail page lists the submitter's own submissions as "Waiting for the creator…" or "Received by the creator ✓".
+

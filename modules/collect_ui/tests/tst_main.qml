@@ -48,6 +48,7 @@ TestCase {
             "screens/NewExperiment.qml",
             "screens/Profile.qml",
             "screens/Results.qml",
+            "screens/Rewards.qml",
             "screens/Submitted.qml"
         ];
         for (var i = 0; i < files.length; i++) {

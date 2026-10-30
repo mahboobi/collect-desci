@@ -7,3 +7,6 @@ pub mod storage;
 
 #[path = "../../../modules/collect_core/rust-lib/src/courier.rs"]
 pub mod courier;
+
+#[path = "../../../modules/collect_core/rust-lib/src/lez.rs"]
+pub mod lez;

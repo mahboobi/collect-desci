@@ -22,6 +22,7 @@ pub mod ids;
 pub mod indexer;
 pub mod media;
 pub mod profile;
+pub mod rewards;
 pub mod schema;
 pub mod seal;
 pub mod session;

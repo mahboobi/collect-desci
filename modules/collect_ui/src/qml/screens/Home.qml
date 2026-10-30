@@ -25,6 +25,12 @@ Flickable {
     signal openExperiment(string experimentId, bool mine)
     signal newExperiment()
     signal refresh()
+    /// Join someone else's experiment from its share link.
+    signal joinLink(string link)
+    property bool joinBusy: false
+    property string joinError: ""
+    // What is typed (LabelledInput's `text` only flows inward).
+    property string typedLink: ""
 
     readonly property string connectionLevel: screen.connection && screen.connection.level
                                               ? screen.connection.level : "offline"
@@ -214,6 +220,66 @@ Flickable {
                         color: newButton.down ? Theme.accentHover : Theme.accent
                     }
                 }
+            }
+        }
+
+        // ---- join with a link ----
+        Column {
+            width: parent.width
+            spacing: Theme.s6
+
+            Row {
+                width: parent.width
+                spacing: Theme.s12
+
+                LabelledInput {
+                    id: linkInput
+                    objectName: "joinLinkInput"
+                    width: parent.width - joinButton.width - Theme.s12
+                    label: "Join with a link"
+                    mono: true
+                    hint: screen.joinError
+                    onEdited: function (value) { screen.typedLink = value.trim(); }
+                }
+
+                Button {
+                    id: joinButton
+                    objectName: "joinButton"
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: linkInput.hint !== "" ? Theme.s24 : 0
+                    height: Theme.touchTarget
+                    leftPadding: Theme.s20
+                    rightPadding: Theme.s20
+                    enabled: !screen.joinBusy && screen.typedLink !== ""
+                    text: screen.joinBusy ? "Fetching\u2026" : "Join"
+                    Accessible.name: "Join the experiment at this link"
+                    onClicked: screen.joinLink(screen.typedLink)
+                    contentItem: Text {
+                        text: joinButton.text
+                        font.family: Theme.sans
+                        font.pixelSize: Theme.body
+                        font.weight: Theme.medium
+                        color: joinButton.enabled ? Theme.accent : Theme.ink3
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        radius: Theme.rControl
+                        color: joinButton.down ? Theme.accentTint : Theme.surface
+                        border.width: 1
+                        border.color: joinButton.enabled ? Theme.accent : Theme.line
+                    }
+                }
+            }
+
+            Text {
+                visible: screen.joinError === ""
+                width: parent.width
+                wrapMode: Text.Wrap
+                text: "Paste a link someone shared (it starts with logos-collect://). Collect fetches the experiment "
+                      + "and its forms from Logos Storage and checks they are signed by its creator."
+                font.family: Theme.sans
+                font.pixelSize: Theme.meta
+                color: Theme.ink3
             }
         }
 

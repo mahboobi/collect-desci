@@ -8,6 +8,7 @@
     { "$ref": "#/$defs/protocol" },
     { "$ref": "#/$defs/submission" },
     { "$ref": "#/$defs/index" },
+    { "$ref": "#/$defs/results" },
     { "$ref": "#/$defs/announcement" }
   ],
 
@@ -90,6 +91,33 @@
         },
         "index": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/cid" }], "description": "Latest index page when this manifest was written" },
         "thumbnail": { "$ref": "#/$defs/media", "description": "Optional cover image: a 16:9 JPEG on Storage, metadata removed. Absent when there is none." },
+        "results": {
+          "type": "array",
+          "description": "Published results snapshots, newest per form, so anyone with the link can find them.",
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "required": ["protocol", "cid", "rows", "published_at"],
+            "additionalProperties": false,
+            "properties": {
+              "protocol": { "$ref": "#/$defs/protocolId" },
+              "cid": { "$ref": "#/$defs/cid" },
+              "rows": { "type": "integer", "minimum": 1 },
+              "published_at": { "$ref": "#/$defs/ts" }
+            }
+          }
+        },
+        "reward": {
+          "type": "object",
+          "description": "Optional token reward per approved submission, paid by the creator after ends_at. Amount in lepta (10^9 per token).",
+          "required": ["token", "amount", "max_per_submitter"],
+          "additionalProperties": false,
+          "properties": {
+            "token": { "const": "lez:testnet" },
+            "amount": { "type": "string", "pattern": "^[1-9][0-9]{0,29}$" },
+            "max_per_submitter": { "type": "integer", "minimum": 1, "maximum": 1000 }
+          }
+        },
         "prev": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/cid" }] },
         "created_at": { "$ref": "#/$defs/ts" },
         "sig": { "$ref": "#/$defs/sig" }
@@ -202,6 +230,47 @@
         "hidden_keys": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/key" } },
         "prev": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/cid" }] },
         "created_at": { "$ref": "#/$defs/ts" },
+        "sig": { "$ref": "#/$defs/sig" }
+      }
+    },
+
+    "results": {
+      "type": "object",
+      "description": "A creator's published results for one form: the experiment and the form as signed, and every approved submission as signed, so each can be verified on its own. Signed, like protocols and index pages, by the experiment's creator (experiment.creator.key). Photos are named inside the submissions; the creator's node holds them.",
+      "required": ["schema", "id", "experiment", "protocol", "rows", "media", "prev", "published_at", "sig"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "collect/results@1" },
+        "id": { "type": "string", "format": "uuid" },
+        "experiment": { "$ref": "#/$defs/experiment" },
+        "protocol": { "$ref": "#/$defs/protocol" },
+        "rows": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10000,
+          "items": {
+            "type": "object",
+            "required": ["cid", "received_at", "submission"],
+            "additionalProperties": false,
+            "properties": {
+              "cid": { "$ref": "#/$defs/cid" },
+              "received_at": { "$ref": "#/$defs/ts" },
+              "submission": { "$ref": "#/$defs/submission" }
+            }
+          }
+        },
+        "media": {
+          "type": "object",
+          "required": ["named", "held"],
+          "additionalProperties": false,
+          "properties": {
+            "named": { "type": "integer", "minimum": 0 },
+            "held": { "type": "integer", "minimum": 0 },
+            "missing": { "type": "array", "items": { "$ref": "#/$defs/cid" } }
+          }
+        },
+        "prev": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/cid" }] },
+        "published_at": { "$ref": "#/$defs/ts" },
         "sig": { "$ref": "#/$defs/sig" }
       }
     },

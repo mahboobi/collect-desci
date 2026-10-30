@@ -171,7 +171,10 @@ Flickable {
                 visible: screen.wallet !== ""
                 width: parent.width
                 label: "Include my wallet address with this submission"
-                hint: screen.wallet + " will be saved with your answers, publicly and permanently. "
+                hint: (Core.rewardOf(screen.experiment)
+                       ? "This experiment pays " + Core.rewardOf(screen.experiment).amount
+                         + " TestToken per approved submission, to this address. " : "")
+                      + screen.wallet + " will be saved with your answers, publicly and permanently. "
                       + "Anyone can see it, and it cannot be removed later."
                 on: screen.includeWallet
                 onToggled: function (on) { screen.includeWallet = on; }

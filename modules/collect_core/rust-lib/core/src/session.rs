@@ -134,6 +134,20 @@ pub struct Session {
     send_failure: Option<String>,
     /// The connection level last reported, so a change is logged once.
     last_level: std::cell::RefCell<String>,
+    /// The creator's verdict on each received submission, by CID:
+    /// `approved` or `rejected`; absent is pending. Private to this node —
+    /// it decides who is paid, and is nobody else's business until then.
+    approvals: BTreeMap<String, String>,
+    /// Every reward payment ever started, oldest first. Written to disk
+    /// *before* each transfer is sent, so a crash mid-send leaves a record
+    /// that stops the same submissions being paid twice.
+    payouts: Vec<Value>,
+    /// The `lez_core` wallet, once a rewards call has needed it.
+    ledger: Option<Box<dyn crate::rewards::Ledger>>,
+    /// This node's submissions to other people's experiments, until each
+    /// one's creator sends a receipt (SPEC 3.2). Re-announced from the drain
+    /// with growing gaps, and saved, so a restart does not forget one.
+    outbox: Vec<Value>,
 }
 
 impl Default for Session {
@@ -163,6 +177,10 @@ impl Session {
             thumbs_tried: Default::default(),
             send_failure: None,
             last_level: Default::default(),
+            approvals: BTreeMap::new(),
+            payouts: Vec::new(),
+            ledger: None,
+            outbox: Vec::new(),
             courier: None,
             seen: delivery::Seen::default(),
             receipts: BTreeMap::new(),
@@ -319,6 +337,10 @@ impl Session {
                 // indexed is a real state, and blanking it says so.
                 "received_at": received,
                 "values": submission.get("values").cloned().unwrap_or_else(|| json!({})),
+                // pending until the creator decides; a row with no CID yet
+                // cannot be decided on, since the CID is what is approved.
+                "approval": self.approvals.get(&cid).map(String::as_str).unwrap_or("pending"),
+                "paid": !cid.is_empty() && self.paid_cids(experiment_id).contains(&cid),
             }));
         }
 
@@ -453,6 +475,15 @@ impl Session {
                 field.extend(map.iter().map(|(k, v)| (k.clone(), v.clone())));
             }
         }
+        if let Some(map) = state["approvals"].as_object() {
+            for (cid, verdict) in map {
+                if let Some(v) = verdict.as_str().filter(|v| *v == "approved" || *v == "rejected") {
+                    self.approvals.insert(cid.clone(), v.to_string());
+                }
+            }
+        }
+        self.payouts = state["payouts"].as_array().cloned().unwrap_or_default();
+        self.outbox = state["outbox"].as_array().cloned().unwrap_or_default();
         for hash in state["seen"].as_array().into_iter().flatten() {
             if let Some(hash) = hash.as_str() {
                 self.seen.accept(hash);
@@ -495,6 +526,9 @@ impl Session {
             "receipts": self.receipts,
             "heads": self.heads,
             "seen": self.seen.hashes().collect::<Vec<_>>(),
+            "approvals": self.approvals,
+            "payouts": self.payouts,
+            "outbox": self.outbox,
         });
         let Ok(text) = serde_json::to_string(&state) else {
             return;
@@ -885,6 +919,219 @@ impl Session {
         api::envelope_ok(data)
     }
 
+    // --------------------------------------------------------- joining, outbox
+
+    /// `experiments.open {link}` — join an experiment from its share link.
+    ///
+    /// Fetches the manifest the link names from Logos Storage, and every form
+    /// it lists, and keeps them only if each one is valid and signed by the
+    /// creator the manifest names. Then this node watches the experiment's
+    /// topic, so receipts and newer heads reach it. A form that cannot be
+    /// fetched yet is reported, not fatal: the experiment is still kept, and
+    /// opening the link again tries the rest.
+    pub fn open_link(&mut self, raw: &str) -> String {
+        if api::fixtures_enabled() {
+            return api::experiments_open(raw);
+        }
+        let request: Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
+        };
+        let link = request.get("link").and_then(Value::as_str).unwrap_or("").trim().to_string();
+        let Some((id, manifest_cid)) = ids::parse_link(&link) else {
+            return api::envelope_err(
+                api::code::BAD_REQUEST,
+                "that is not a Collect link; it starts with logos-collect://exp/",
+            );
+        };
+        let manifest_cid = match store::as_document_cid(&manifest_cid) {
+            Ok(c) => c,
+            Err(e) => return api::envelope_err(api::code::BAD_REQUEST, e.to_string()),
+        };
+        // Already ours: nothing to fetch.
+        if let Some(ours) = self.experiments.iter().find(|e| e.get("id").and_then(Value::as_str) == Some(&id)) {
+            if ours.pointer("/creator/key").and_then(Value::as_str) == Some(&self.creator_key) {
+                return self.get(&json!({ "experimentId": id }).to_string());
+            }
+        }
+        let Some(store) = self.store.as_deref() else {
+            return api::envelope_err(
+                api::code::NOT_WIRED,
+                "Logos Storage is not reachable, and the experiment has to be fetched from it",
+            );
+        };
+
+        let fetch = |cid: &str| -> Result<Value, String> {
+            let bytes = store
+                .get(store::bare_cid(cid), false)
+                .map_err(|e| format!("could not fetch {cid}: {e}"))?;
+            serde_json::from_slice(&bytes).map_err(|e| format!("{cid} is not JSON: {e}"))
+        };
+
+        let manifest = match fetch(&manifest_cid) {
+            Ok(m) => m,
+            Err(e) => {
+                return api::envelope_err(
+                    api::code::REJECTED,
+                    format!("{e}. The creator's node, or another that holds it, has to be online."),
+                )
+            }
+        };
+        let errors = schema::errors_as(&manifest, schema::Kind::Experiment);
+        if !errors.is_empty() {
+            return api::envelope_err(
+                api::code::INVALID_DOCUMENT,
+                format!("the experiment at that link is not valid: {}", errors.join("; ")),
+            );
+        }
+        if manifest.get("id").and_then(Value::as_str) != Some(&id) {
+            return api::envelope_err(
+                api::code::INVALID_DOCUMENT,
+                "the document at that link is a different experiment than the link names",
+            );
+        }
+        let creator_key = match crate::sign::verify(&manifest) {
+            Ok(k) => k,
+            Err(e) => {
+                return api::envelope_err(
+                    api::code::INVALID_DOCUMENT,
+                    format!("the experiment's signature does not check out: {e}"),
+                )
+            }
+        };
+
+        // Each form, checked the same way and against the same creator.
+        let mut forms: Vec<Value> = Vec::new();
+        let mut missing: Vec<Value> = Vec::new();
+        for entry in manifest.get("protocols").and_then(Value::as_array).cloned().unwrap_or_default() {
+            let pid = entry.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+            let cid = entry.get("cid").and_then(Value::as_str).unwrap_or("").to_string();
+            let checked = fetch(&cid).and_then(|doc| {
+                let errors = schema::errors_as(&doc, schema::Kind::Protocol);
+                if !errors.is_empty() {
+                    return Err(format!("not a valid form: {}", errors.join("; ")));
+                }
+                if doc.get("id").and_then(Value::as_str) != Some(&pid)
+                    || doc.get("experiment").and_then(Value::as_str) != Some(&id)
+                {
+                    return Err("a different form than the experiment lists".into());
+                }
+                crate::sign::verify_with(&doc, &creator_key)
+                    .map_err(|e| format!("not signed by the experiment's creator: {e}"))?;
+                Ok(doc)
+            });
+            match checked {
+                Ok(doc) => forms.push(doc),
+                Err(e) => missing.push(json!({ "id": pid, "reason": e })),
+            }
+        }
+
+        // Keep the newer of what we had and what we fetched.
+        let version = |d: &Value| d.get("version").and_then(Value::as_u64).unwrap_or(0);
+        match self.experiments.iter_mut().find(|e| e.get("id").and_then(Value::as_str) == Some(&id)) {
+            Some(existing) if version(existing) >= version(&manifest) => {}
+            Some(existing) => *existing = manifest.clone(),
+            None => self.experiments.push(manifest.clone()),
+        }
+        self.publications.insert(id.clone(), Publication::Published(manifest_cid.clone()));
+        for form in forms {
+            let pid = form.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+            match self.protocols.iter_mut().find(|p| p.get("id").and_then(Value::as_str) == Some(&pid)) {
+                Some(existing) if version(existing) >= version(&form) => {}
+                Some(existing) => *existing = form,
+                None => self.protocols.push(form),
+            }
+        }
+        if let Some(courier) = self.courier.as_deref() {
+            if let Err(e) = courier.subscribe(&delivery::topic(&id)) {
+                eprintln!("collect_core: cannot watch {id}: {e}");
+            }
+        }
+
+        let mut data: Value = serde_json::from_str(&self.get(&json!({ "experimentId": id }).to_string()))
+            .ok()
+            .and_then(|v: Value| v.get("data").cloned())
+            .unwrap_or(Value::Null);
+        data["opened"] = json!(true);
+        data["missing_forms"] = json!(missing);
+        api::envelope_ok(data)
+    }
+
+    /// Announce outbox entry `at` once, and record how that went.
+    fn announce_outbox(&mut self, at: usize, now: DateTime<Utc>) -> Value {
+        let entry = self.outbox[at].clone();
+        let text = |k: &str| entry.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let experiment = text("experiment");
+        let announcement = delivery::submission(
+            &experiment,
+            &self.creator_key.clone(),
+            &text("cid"),
+            &text("protocol"),
+            entry.get("version").and_then(Value::as_u64).unwrap_or(1),
+            &now.to_rfc3339(),
+        );
+        let outcome = self.announce(&experiment, &announcement, schema::Kind::SubmissionAnnouncement);
+        let record = &mut self.outbox[at];
+        record["attempts"] = json!(record["attempts"].as_u64().unwrap_or(0) + 1);
+        record["last_attempt"] = json!(now.to_rfc3339());
+        match outcome {
+            Ok(request_id) => {
+                record["last_error"] = Value::Null;
+                record["last_request"] = json!(request_id);
+                json!({ "sent": true })
+            }
+            Err(envelope) => {
+                let message = serde_json::from_str::<Value>(&envelope)
+                    .ok()
+                    .and_then(|v| v.pointer("/error/message").and_then(Value::as_str).map(str::to_string))
+                    .unwrap_or_else(|| "the announcement could not be sent".into());
+                record["last_error"] = json!(message);
+                json!({ "sent": false, "error": message })
+            }
+        }
+    }
+
+    /// Re-announce whatever is still waiting and due. The gap doubles after
+    /// each try, from `OUTBOX_FIRST_GAP` up to `OUTBOX_MAX_GAP`, so a creator
+    /// who is away for days is not flooded and one who is back soon hears
+    /// soon. Returns how many were sent.
+    fn resend_outbox(&mut self, now: DateTime<Utc>) -> usize {
+        let mut sent = 0;
+        for at in 0..self.outbox.len() {
+            if self.outbox[at]["state"] != json!("waiting") {
+                continue;
+            }
+            let attempts = self.outbox[at]["attempts"].as_u64().unwrap_or(0) as u32;
+            let gap = OUTBOX_FIRST_GAP
+                .checked_mul(1 << attempts.saturating_sub(1).min(8))
+                .unwrap_or(OUTBOX_MAX_GAP)
+                .min(OUTBOX_MAX_GAP);
+            let due = self.outbox[at]["last_attempt"]
+                .as_str()
+                .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+                .map(|last| now >= last.with_timezone(&Utc) + gap)
+                .unwrap_or(true);
+            if due && self.announce_outbox(at, now)["sent"] == json!(true) {
+                sent += 1;
+            }
+        }
+        sent
+    }
+
+    /// `submissions.mine {experimentId?}` — this node's submissions to other
+    /// people's experiments and whether each creator has confirmed it.
+    pub fn submissions_mine(&self, raw: &str) -> String {
+        let request: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+        let only = request.get("experimentId").and_then(Value::as_str);
+        let rows: Vec<Value> = self
+            .outbox
+            .iter()
+            .filter(|e| only.is_none_or(|id| e["experiment"] == json!(id)))
+            .cloned()
+            .collect();
+        api::envelope_ok(json!({ "submissions": rows }))
+    }
+
     /// `experiments.setThumbnail {experimentId, path}` — give an experiment a
     /// cover image.
     ///
@@ -1142,6 +1389,702 @@ impl Session {
             }
         }
         fetched
+    }
+
+    // ------------------------------------------------------------- rewards
+
+    pub fn attach_ledger(&mut self, ledger: Box<dyn crate::rewards::Ledger>) {
+        self.ledger = Some(ledger);
+    }
+
+    pub fn has_ledger(&self) -> bool {
+        self.ledger.is_some()
+    }
+
+    /// `experiments.setReward {experimentId, amount, maxPerSubmitter}` — offer
+    /// (or with no amount, withdraw) a reward per approved submission.
+    ///
+    /// A new manifest version, so it is public: submitters see the offer
+    /// before they take part. Refused once any reward has been paid, since
+    /// changing the terms after paying some people would be unfair to them
+    /// or to everyone else.
+    pub fn set_reward(&mut self, raw: &str) -> String {
+        let request: Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
+        };
+        let id = request.get("experimentId").and_then(Value::as_str).unwrap_or("").to_string();
+        if let Err(e) = self.may_edit(&id) {
+            return e;
+        }
+        if !self.paid_cids(&id).is_empty() {
+            return api::envelope_err(
+                api::code::REJECTED,
+                "rewards have already been paid for this experiment, so its reward can no longer change",
+            );
+        }
+        let amount = request.get("amount").and_then(Value::as_str).unwrap_or("").trim().to_string();
+        let reward = if amount.is_empty() {
+            None
+        } else {
+            let lepta = match crate::rewards::parse_tokens(&amount) {
+                Ok(l) => l,
+                Err(problem) => {
+                    return api::envelope_err_data(
+                        api::code::BAD_REQUEST,
+                        problem.clone(),
+                        json!({ "problems": { "amount": problem } }),
+                    )
+                }
+            };
+            let cap = request.get("maxPerSubmitter").and_then(Value::as_u64).unwrap_or(1);
+            if cap == 0 || cap > crate::rewards::MAX_PER_SUBMITTER_CEILING {
+                let problem = format!("Between 1 and {}", crate::rewards::MAX_PER_SUBMITTER_CEILING);
+                return api::envelope_err_data(
+                    api::code::BAD_REQUEST,
+                    problem.clone(),
+                    json!({ "problems": { "maxPerSubmitter": problem } }),
+                );
+            }
+            Some(crate::rewards::manifest_reward(lepta, cap))
+        };
+        let current = self
+            .experiments
+            .iter()
+            .find(|e| e.get("id").and_then(Value::as_str) == Some(&id))
+            .and_then(|e| e.get("reward").cloned());
+        if current == reward {
+            return self.get(&json!({ "experimentId": id }).to_string());
+        }
+        if let Err(e) = self.reseal_with(&id, |doc| match reward {
+            Some(r) => doc["reward"] = r,
+            None => {
+                if let Some(map) = doc.as_object_mut() {
+                    map.remove("reward");
+                }
+            }
+        }) {
+            return api::envelope_err(api::code::REJECTED, e);
+        }
+        self.get(&json!({ "experimentId": id }).to_string())
+    }
+
+    /// `results.setApproval {experimentId, cid, status}` — approve, reject,
+    /// or back to pending. Only received submissions (with a CID) from
+    /// submitters not hidden, and never one already paid for.
+    pub fn set_approval(&mut self, raw: &str) -> String {
+        let request: Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
+        };
+        let id = request.get("experimentId").and_then(Value::as_str).unwrap_or("").to_string();
+        if let Err(e) = self.may_edit(&id) {
+            return e;
+        }
+        let cid = request.get("cid").and_then(Value::as_str).unwrap_or("").to_string();
+        let status = request.get("status").and_then(Value::as_str).unwrap_or("");
+        if !["approved", "rejected", "pending"].contains(&status) {
+            return api::envelope_err(
+                api::code::BAD_REQUEST,
+                "`status` is approved, rejected or pending",
+            );
+        }
+        if !self.visible_submissions(&id).iter().any(|(_, c)| c == &cid) {
+            return api::envelope_err(
+                api::code::BAD_REQUEST,
+                "that submission is not one this experiment has received",
+            );
+        }
+        if self.paid_cids(&id).contains(&cid) {
+            return api::envelope_err(
+                api::code::REJECTED,
+                "that submission has already been rewarded",
+            );
+        }
+        if status == "pending" {
+            self.approvals.remove(&cid);
+        } else {
+            self.approvals.insert(cid.clone(), status.to_string());
+        }
+        api::envelope_ok(json!({ "cid": cid, "approval": status }))
+    }
+
+    /// Every received submission of `experiment_id` from a submitter who is
+    /// not hidden, with its CID — the same join the results table makes.
+    /// Submissions not indexed yet have no CID and are left out: the CID is
+    /// what gets approved and paid for.
+    fn visible_submissions(&self, experiment_id: &str) -> Vec<(&Value, String)> {
+        let hidden = self.hidden_for(experiment_id);
+        let mut out = Vec::new();
+        for submission in &self.submissions {
+            if submission.get("experiment").and_then(Value::as_str) != Some(experiment_id) {
+                continue;
+            }
+            let submitter = submission.pointer("/submitter/key").and_then(Value::as_str).unwrap_or("");
+            if hidden.iter().any(|h| h == submitter) {
+                continue;
+            }
+            let submitted_at = submission.get("submitted_at").and_then(Value::as_str).unwrap_or("");
+            let cid = self
+                .index_pages
+                .iter()
+                .filter_map(|p| p.get("entries").and_then(Value::as_array))
+                .flatten()
+                .find(|e| {
+                    e.get("submitter").and_then(Value::as_str) == Some(submitter)
+                        && e.get("submitted_at").and_then(Value::as_str) == Some(submitted_at)
+                })
+                .and_then(|e| e.get("cid").and_then(Value::as_str))
+                .unwrap_or("");
+            if !cid.is_empty() {
+                out.push((submission, cid.to_string()));
+            }
+        }
+        out
+    }
+
+    /// Submissions of this experiment already paid for, or being paid for.
+    /// A payment whose outcome is unknown counts as paid: paying twice is
+    /// the failure to rule out.
+    fn paid_cids(&self, experiment_id: &str) -> std::collections::BTreeSet<String> {
+        self.payouts
+            .iter()
+            .filter(|p| p.get("experiment").and_then(Value::as_str) == Some(experiment_id))
+            .filter(|p| p.get("state").and_then(Value::as_str) != Some("failed"))
+            .filter_map(|p| p.get("submissions").and_then(Value::as_array))
+            .flatten()
+            .filter_map(|c| c.as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// Who would be paid now, and who would not and why.
+    fn build_plan(
+        &self,
+        experiment_id: &str,
+    ) -> Result<(Vec<crate::rewards::Payee>, Vec<Value>, usize, u128, u64), String> {
+        let experiment = self
+            .experiments
+            .iter()
+            .find(|e| e.get("id").and_then(Value::as_str) == Some(experiment_id))
+            .ok_or_else(|| format!("no experiment `{experiment_id}` on this node"))?;
+        let (each, cap) = crate::rewards::read_reward(experiment)
+            .ok_or_else(|| "this experiment offers no reward".to_string())?;
+        let paid = self.paid_cids(experiment_id);
+
+        // Per submitter, in the order they first submitted.
+        struct Acc<'a> {
+            name: String,
+            wallet: String,
+            approved: Vec<String>,
+            already: usize,
+            latest: &'a str,
+        }
+        let mut order: Vec<String> = Vec::new();
+        let mut by: BTreeMap<String, Acc> = BTreeMap::new();
+        let mut pending = 0usize;
+        for (submission, cid) in self.visible_submissions(experiment_id) {
+            let key = submission.pointer("/submitter/key").and_then(Value::as_str).unwrap_or("").to_string();
+            let at = submission.get("submitted_at").and_then(Value::as_str).unwrap_or("");
+            let acc = by.entry(key.clone()).or_insert_with(|| {
+                order.push(key.clone());
+                Acc { name: String::new(), wallet: String::new(), approved: Vec::new(), already: 0, latest: "" }
+            });
+            // The newest submission's name and wallet are the ones that count.
+            if at >= acc.latest {
+                acc.latest = at;
+                if let Some(n) = submission.pointer("/submitter/name").and_then(Value::as_str) {
+                    if !n.is_empty() {
+                        acc.name = n.to_string();
+                    }
+                }
+                if let Some(w) = submission.get("wallet").and_then(Value::as_str) {
+                    acc.wallet = w.to_string();
+                }
+            }
+            if paid.contains(&cid) {
+                acc.already += 1;
+                continue;
+            }
+            match self.approvals.get(&cid).map(String::as_str) {
+                Some("approved") => acc.approved.push(cid),
+                Some(_) => {}
+                None => pending += 1,
+            }
+        }
+
+        let mut payees = Vec::new();
+        let mut skipped = Vec::new();
+        for key in order {
+            let acc = &by[&key];
+            if acc.approved.is_empty() {
+                continue;
+            }
+            let room = (cap as usize).saturating_sub(acc.already);
+            let skip = |reason: &str, count: usize| {
+                json!({ "submitter": key, "name": acc.name, "wallet": acc.wallet,
+                        "count": count, "reason": reason })
+            };
+            if room == 0 {
+                skipped.push(skip(&format!("already rewarded for {cap}, the most per person"), acc.approved.len()));
+                continue;
+            }
+            if acc.wallet.is_empty() {
+                skipped.push(skip("did not include a wallet address", acc.approved.len()));
+                continue;
+            }
+            let wallet_hex = match crate::rewards::account_hex(&acc.wallet) {
+                Ok(h) => h,
+                Err(_) => {
+                    skipped.push(skip("the wallet address is not a LEZ public account", acc.approved.len()));
+                    continue;
+                }
+            };
+            let cids: Vec<String> = acc.approved.iter().take(room).cloned().collect();
+            if acc.approved.len() > cids.len() {
+                skipped.push(skip(
+                    &format!("over the limit of {cap} per person"),
+                    acc.approved.len() - cids.len(),
+                ));
+            }
+            payees.push(crate::rewards::Payee {
+                submitter: key.clone(),
+                name: acc.name.clone(),
+                wallet: acc.wallet.clone(),
+                wallet_hex,
+                lepta: each * cids.len() as u128,
+                cids,
+            });
+        }
+        Ok((payees, skipped, pending, each, cap))
+    }
+
+    /// `rewards.plan {experimentId, from?}` — what paying now would do.
+    ///
+    /// With `from`, also that account's balance, so the creator sees whether
+    /// it covers the total before confirming anything.
+    pub fn rewards_plan(&self, raw: &str, now: DateTime<Utc>) -> String {
+        let request: Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
+        };
+        let id = request.get("experimentId").and_then(Value::as_str).unwrap_or("");
+        if let Err(e) = self.may_edit(id) {
+            return e;
+        }
+        let (payees, skipped, pending, each, cap) = match self.build_plan(id) {
+            Ok(p) => p,
+            Err(e) => return api::envelope_err(api::code::BAD_REQUEST, e),
+        };
+        let total: u128 = payees.iter().map(|p| p.lepta).sum();
+        let ends_at = self
+            .experiments
+            .iter()
+            .find(|e| e.get("id").and_then(Value::as_str) == Some(id))
+            .and_then(|e| e.get("ends_at").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_string();
+        let ended = DateTime::parse_from_rfc3339(&ends_at)
+            .map(|end| now >= end.with_timezone(&Utc))
+            .unwrap_or(false);
+
+        let mut from = json!(null);
+        if let Some(address) = request.get("from").and_then(Value::as_str).filter(|a| !a.trim().is_empty()) {
+            from = match crate::rewards::account_hex(address) {
+                Err(problem) => json!({ "address": address, "problem": problem }),
+                Ok(hex) => match self.ledger.as_deref() {
+                    None => json!({ "address": address, "hex": hex,
+                                    "problem": "LEZ Wallet is not reachable from Collect" }),
+                    Some(ledger) => match ledger.balance(&hex) {
+                        Ok(b) => json!({ "address": address, "hex": hex,
+                                         "balance_lepta": b.to_string(),
+                                         "balance": crate::rewards::format_tokens(b),
+                                         "covers": b >= total }),
+                        Err(e) => json!({ "address": address, "hex": hex,
+                                          "problem": format!("could not read the balance: {e}") }),
+                    },
+                },
+            };
+        }
+
+        api::envelope_ok(json!({
+            "reward": {
+                "amount": crate::rewards::format_tokens(each),
+                "amount_lepta": each.to_string(),
+                "max_per_submitter": cap,
+                "symbol": crate::rewards::SYMBOL,
+            },
+            "ends_at": ends_at,
+            "ended": ended,
+            "payees": payees.iter().map(|p| p.as_json()).collect::<Vec<_>>(),
+            "skipped": skipped,
+            "pending": pending,
+            "total": crate::rewards::format_tokens(total),
+            "total_lepta": total.to_string(),
+            "plan_id": crate::rewards::plan_id(&payees),
+            "from": from,
+            "ledger": self.ledger.as_deref().map(|l| l.describe()),
+            "payouts": self.payouts_of(id),
+        }))
+    }
+
+    fn payouts_of(&self, experiment_id: &str) -> Vec<Value> {
+        self.payouts
+            .iter()
+            .filter(|p| p.get("experiment").and_then(Value::as_str) == Some(experiment_id))
+            .cloned()
+            .collect()
+    }
+
+    /// `rewards.pay {experimentId, from, submitter, cids, amountLepta}` — pay
+    /// one submitter, exactly as the creator was shown.
+    ///
+    /// The plan is rebuilt and this submitter's row must match what came in —
+    /// same submissions, same amount — or nothing is sent: an approval
+    /// changed, or a payment landed, since the creator looked. The payment is
+    /// recorded and saved *before* the transfer, so a crash in between can
+    /// never lead to paying the same submissions again.
+    pub fn rewards_pay(&mut self, raw: &str, now: DateTime<Utc>) -> String {
+        let request: Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
+        };
+        let id = request.get("experimentId").and_then(Value::as_str).unwrap_or("").to_string();
+        if let Err(e) = self.may_edit(&id) {
+            return e;
+        }
+        let plan = self.rewards_plan(&json!({ "experimentId": id }).to_string(), now);
+        let plan: Value = serde_json::from_str(&plan).unwrap_or(Value::Null);
+        if plan["ok"] != json!(true) {
+            return api::envelope_err(api::code::BAD_REQUEST, plan["error"]["message"].as_str().unwrap_or("no plan"));
+        }
+        if plan["data"]["ended"] != json!(true) {
+            return api::envelope_err(api::code::REJECTED, "rewards are paid once the experiment has ended");
+        }
+        if self.payouts.iter().any(|p| {
+            p.get("experiment").and_then(Value::as_str) == Some(&id)
+                && p.get("state").and_then(Value::as_str) == Some("sending")
+        }) {
+            return api::envelope_err(
+                api::code::REJECTED,
+                "an earlier payment's outcome is unknown; check it in LEZ Wallet and resolve it before paying more",
+            );
+        }
+        if self.ledger.is_none() {
+            return api::envelope_err(api::code::NOT_WIRED, "LEZ Wallet is not reachable from Collect");
+        }
+        let from = match crate::rewards::account_hex(request.get("from").and_then(Value::as_str).unwrap_or("")) {
+            Ok(h) => h,
+            Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("paying account: {e}")),
+        };
+        let submitter = request.get("submitter").and_then(Value::as_str).unwrap_or("");
+        let Some(row) = plan["data"]["payees"]
+            .as_array()
+            .and_then(|a| a.iter().find(|p| p["submitter"] == json!(submitter)))
+            .cloned()
+        else {
+            return api::envelope_err(api::code::REJECTED, "that submitter is not owed anything now");
+        };
+        if row["submissions"] != request["cids"] || row["amount_lepta"] != request["amountLepta"] {
+            return api::envelope_err(
+                api::code::REJECTED,
+                "the plan changed since you reviewed it; look at it again before paying",
+            );
+        }
+        let lepta: u128 = row["amount_lepta"].as_str().and_then(|a| a.parse().ok()).unwrap_or(0);
+        let to = row["wallet_hex"].as_str().unwrap_or("").to_string();
+        if lepta == 0 || to.is_empty() {
+            return api::envelope_err(api::code::REJECTED, "nothing to pay");
+        }
+        if to == from {
+            return api::envelope_err(api::code::REJECTED, "the paying account and the submitter's are the same");
+        }
+
+        let payout_id = uuid::Uuid::now_v7().to_string();
+        self.payouts.push(json!({
+            "id": payout_id,
+            "experiment": id,
+            "submitter": submitter,
+            "name": row["name"],
+            "wallet": row["wallet"],
+            "wallet_hex": to,
+            "from_hex": from,
+            "submissions": row["submissions"],
+            "amount_lepta": lepta.to_string(),
+            "amount": crate::rewards::format_tokens(lepta),
+            "state": "sending",
+            "started_at": now.to_rfc3339(),
+        }));
+        // On disk before a single token moves.
+        self.save_state();
+
+        let outcome = match self.ledger.as_deref() {
+            Some(ledger) => ledger.transfer_public(&from, &to, lepta),
+            None => Err("LEZ Wallet stopped being reachable".to_string()),
+        };
+        let Some(record) = self.payouts.iter_mut().find(|p| p["id"] == json!(payout_id)) else {
+            return api::envelope_err(api::code::REJECTED, "the payment record vanished");
+        };
+        match outcome {
+            Ok(tx) => {
+                record["state"] = json!("sent");
+                record["tx"] = json!(tx.trim().trim_matches('"'));
+            }
+            Err(e) => {
+                record["state"] = json!("failed");
+                record["error"] = json!(e);
+            }
+        }
+        record["finished_at"] = json!(now.to_rfc3339());
+        let record = record.clone();
+        self.save_state();
+        if record["state"] == json!("failed") {
+            return api::envelope_err_data(
+                api::code::REJECTED,
+                format!("the transfer was refused: {}", record["error"].as_str().unwrap_or("")),
+                json!({ "payout": record }),
+            );
+        }
+        api::envelope_ok(json!({ "payout": record }))
+    }
+
+    /// `rewards.refresh {experimentId}` — ask the chain whether sent payments
+    /// are in a block yet.
+    pub fn rewards_refresh(&mut self, raw: &str) -> String {
+        let request: Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
+        };
+        let id = request.get("experimentId").and_then(Value::as_str).unwrap_or("").to_string();
+        if let Err(e) = self.may_edit(&id) {
+            return e;
+        }
+        if let Some(ledger) = self.ledger.as_deref() {
+            for p in self.payouts.iter_mut() {
+                if p["experiment"] != json!(id) || p["state"] != json!("sent") {
+                    continue;
+                }
+                if let Some(tx) = p["tx"].as_str() {
+                    if let Ok(true) = ledger.confirmed(tx) {
+                        p["state"] = json!("confirmed");
+                    }
+                }
+            }
+        }
+        api::envelope_ok(json!({ "payouts": self.payouts_of(&id) }))
+    }
+
+    /// `rewards.resolve {experimentId, payoutId, outcome}` — settle a payment
+    /// whose outcome is unknown (a crash between recording and sending), once
+    /// the creator has looked in LEZ Wallet: `failed` frees its submissions
+    /// to be paid again, `sent` keeps them paid.
+    pub fn rewards_resolve(&mut self, raw: &str) -> String {
+        let request: Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
+        };
+        let id = request.get("experimentId").and_then(Value::as_str).unwrap_or("").to_string();
+        if let Err(e) = self.may_edit(&id) {
+            return e;
+        }
+        let outcome = request.get("outcome").and_then(Value::as_str).unwrap_or("");
+        if outcome != "failed" && outcome != "sent" {
+            return api::envelope_err(api::code::BAD_REQUEST, "`outcome` is failed or sent");
+        }
+        let payout_id = request.get("payoutId").cloned().unwrap_or(Value::Null);
+        let Some(p) = self
+            .payouts
+            .iter_mut()
+            .find(|p| p["id"] == payout_id && p["experiment"] == json!(id))
+        else {
+            return api::envelope_err(api::code::BAD_REQUEST, "no such payment");
+        };
+        if p["state"] != json!("sending") {
+            return api::envelope_err(api::code::REJECTED, "only a payment with an unknown outcome can be resolved");
+        }
+        p["state"] = json!(outcome);
+        p["resolved_by_creator"] = json!(true);
+        api::envelope_ok(json!({ "payouts": self.payouts_of(&id) }))
+    }
+
+    // ------------------------------------------------------- published results
+
+    /// `results.publish {experimentId, protocolId}` — the creator's "Push to
+    /// Logos Storage": one signed `collect/results@1` document holding the
+    /// experiment and the form as signed, and every **approved** submission
+    /// to that form as signed, each with its CID and when it arrived.
+    ///
+    /// Every cost lands on the creator. Before publishing, each photo the
+    /// approved submissions name is made local to the creator's node —
+    /// fetched from the network if it is not here already — so the creator
+    /// holds and serves the whole dataset, not just the table. Then the
+    /// snapshot is uploaded, and a new manifest version lists it so anyone
+    /// with the link can find it. Pushing again publishes a new snapshot
+    /// whose `prev` names the last one: nothing published can be withdrawn.
+    pub fn publish_results(&mut self, raw: &str, now: DateTime<Utc>) -> String {
+        let request: Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
+        };
+        let id = request.get("experimentId").and_then(Value::as_str).unwrap_or("").to_string();
+        let protocol_id = request.get("protocolId").and_then(Value::as_str).unwrap_or("").to_string();
+        if let Err(e) = self.may_edit(&id) {
+            return e;
+        }
+        if self.store.is_none() {
+            return api::envelope_err(
+                api::code::NOT_WIRED,
+                "Logos Storage is not reachable, so there is nowhere to push the results to",
+            );
+        }
+        let Some(experiment) = self
+            .experiments
+            .iter()
+            .find(|e| e.get("id").and_then(Value::as_str) == Some(&id))
+            .cloned()
+        else {
+            return api::envelope_err(api::code::BAD_REQUEST, format!("no experiment `{id}` on this node"));
+        };
+        let named = experiment
+            .get("protocols")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().any(|p| p.get("id").and_then(Value::as_str) == Some(&protocol_id)))
+            .unwrap_or(false);
+        let Some(protocol) = self
+            .protocols
+            .iter()
+            .find(|p| p.get("id").and_then(Value::as_str) == Some(&protocol_id))
+            .cloned()
+            .filter(|_| named)
+        else {
+            return api::envelope_err(
+                api::code::BAD_REQUEST,
+                format!("this experiment has no form `{protocol_id}` on this node"),
+            );
+        };
+
+        // Approved submissions to this form, with when each arrived.
+        let mut rows: Vec<Value> = Vec::new();
+        for (submission, cid) in self.visible_submissions(&id) {
+            if submission.pointer("/protocol/id").and_then(Value::as_str) != Some(&protocol_id) {
+                continue;
+            }
+            if self.approvals.get(&cid).map(String::as_str) != Some("approved") {
+                continue;
+            }
+            let submitted_at = submission.get("submitted_at").and_then(Value::as_str).unwrap_or("");
+            let received_at = self
+                .index_pages
+                .iter()
+                .filter_map(|p| p.get("entries").and_then(Value::as_array))
+                .flatten()
+                .find(|e| e.get("cid").and_then(Value::as_str) == Some(&cid))
+                .and_then(|e| e.get("received_at").and_then(Value::as_str))
+                .unwrap_or(submitted_at)
+                .to_string();
+            rows.push(json!({ "cid": cid, "received_at": received_at, "submission": submission }));
+        }
+        if rows.is_empty() {
+            return api::envelope_err(
+                api::code::REJECTED,
+                "no submissions to this form are approved yet; approve the ones to publish in the Review column",
+            );
+        }
+
+        // Every photo the published rows name, held on this node.
+        let mut wanted: Vec<String> = Vec::new();
+        for row in &rows {
+            collect_media_cids(&row["submission"]["values"], &mut wanted);
+        }
+        wanted.sort();
+        wanted.dedup();
+        let store = self.store.as_deref().expect("checked above");
+        let deadline = std::time::Instant::now() + RESULTS_MEDIA_BUDGET;
+        let mut missing: Vec<String> = Vec::new();
+        for cid in &wanted {
+            let bare = store::bare_cid(cid);
+            let held = store.get(bare, true).is_ok()
+                || (std::time::Instant::now() < deadline && store.get(bare, false).is_ok());
+            if !held {
+                missing.push(cid.clone());
+            }
+        }
+
+        let prev = experiment
+            .get("results")
+            .and_then(Value::as_array)
+            .and_then(|a| a.iter().find(|r| r.get("protocol").and_then(Value::as_str) == Some(&protocol_id)))
+            .and_then(|r| r.get("cid").cloned())
+            .unwrap_or(Value::Null);
+        let mut media = json!({ "named": wanted.len(), "held": wanted.len() - missing.len() });
+        if !missing.is_empty() {
+            media["missing"] = json!(missing);
+        }
+        let doc = json!({
+            "schema": "collect/results@1",
+            "id": uuid::Uuid::now_v7().to_string(),
+            "experiment": experiment,
+            "protocol": protocol,
+            "rows": rows,
+            "media": media,
+            "prev": prev,
+            "published_at": now.to_rfc3339(),
+            "sig": "00".repeat(64),
+        });
+        let doc = match self.signed(&doc) {
+            Ok(d) => d,
+            Err(e) => return api::envelope_err(api::code::NOT_WIRED, e),
+        };
+        let errors = schema::errors_as(&doc, schema::Kind::Results);
+        if !errors.is_empty() {
+            return api::envelope_err(
+                api::code::INVALID_DOCUMENT,
+                format!("the results document does not validate: {}", errors.join("; ")),
+            );
+        }
+
+        // A fresh time budget for the upload itself: fetching photos may
+        // have used the call's.
+        self.start_publish_budget();
+        let key = format!("results:{id}:{protocol_id}");
+        self.publish_doc("results", &key, &doc);
+        let Some(cid) = self.cid_of(&key).map(str::to_string) else {
+            let report = self.publish_report(&key);
+            return api::envelope_err_data(
+                api::code::REJECTED,
+                "the results could not be pushed to Logos Storage; try again",
+                json!({ "publish": report }),
+            );
+        };
+
+        // Listed in the manifest, newest per form, so the link leads to it.
+        let entry = json!({
+            "protocol": protocol_id,
+            "cid": cid,
+            "rows": doc["rows"].as_array().map(Vec::len).unwrap_or(0),
+            "published_at": now.to_rfc3339(),
+        });
+        let listed = self.reseal_with(&id, |manifest| {
+            let mut list: Vec<Value> = manifest
+                .get("results")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|r| r.get("protocol").and_then(Value::as_str) != Some(&protocol_id))
+                .collect();
+            list.push(entry.clone());
+            manifest["results"] = json!(list);
+        });
+        api::envelope_ok(json!({
+            "cid": cid,
+            "rows": entry["rows"],
+            "media": doc["media"],
+            "prev": doc["prev"],
+            "published_at": entry["published_at"],
+            // The snapshot stands even if the manifest could not be updated;
+            // say so rather than fail a push that happened.
+            "listed_in_manifest": listed.is_ok(),
+        }))
     }
 
     /// `experiments.create` — a new manifest from the C2 form.
@@ -1866,6 +2809,7 @@ impl Session {
             }
             results.push(outcome["data"].clone());
         }
+        let resent = self.resend_outbox(now);
         let shared = self.share_profiles(now);
         let thumbnails = self.fetch_thumbnails();
         api::envelope_ok(json!({
@@ -1874,6 +2818,7 @@ impl Session {
             "results": results,
             "profiles_shared": shared,
             "thumbnails_fetched": thumbnails,
+            "resent": resent,
         }))
     }
 
@@ -2001,7 +2946,31 @@ impl Session {
             schema::Kind::SubmissionAnnouncement => self.receive_submission(&from_topic, &announcement, now),
             schema::Kind::ReceiptAnnouncement => {
                 let cid = announcement.get("cid").and_then(Value::as_str).unwrap_or("").to_string();
+                // Only the creator's receipt counts: anyone can post on the
+                // topic, and a stranger's receipt would stop the re-announcing
+                // that is the only way the creator ever hears of it.
+                let creator = self
+                    .experiments
+                    .iter()
+                    .find(|e| e.get("id").and_then(Value::as_str) == Some(from_topic.as_str()))
+                    .and_then(|e| e.pointer("/creator/key").and_then(Value::as_str))
+                    .map(str::to_string);
+                let from = announcement.get("from").and_then(Value::as_str).unwrap_or("");
+                if creator.as_deref().is_some_and(|c| c != from) {
+                    return api::envelope_ok(json!({
+                        "handled": false,
+                        "reason": "not_the_creator",
+                        "detail": "a receipt from someone other than the experiment's creator",
+                    }));
+                }
                 self.receipts.insert(cid.clone(), announcement.clone());
+                for entry in self.outbox.iter_mut() {
+                    if entry["cid"] == json!(cid) && entry["state"] != json!("received") {
+                        entry["state"] = json!("received");
+                        entry["received_at"] = json!(now.to_rfc3339());
+                        entry["index_page"] = announcement.get("index_page").cloned().unwrap_or(Value::Null);
+                    }
+                }
                 api::envelope_ok(json!({
                     "handled": true,
                     "kind": "receipt",
@@ -2469,6 +3438,32 @@ impl Session {
             }
         }
 
+        // Someone else's experiment: the creator hears of it only through an
+        // announcement, so it goes in the outbox and is announced now. Not
+        // being able to announce yet (no Delivery, no RLN membership) is not
+        // a failed submission — it is signed and on Storage — so it waits
+        // in the outbox and the drain keeps trying.
+        let mut announce = Value::Null;
+        if experiment.pointer("/creator/key").and_then(Value::as_str) != Some(&self.creator_key) {
+            if let Some(cid) = cid.clone() {
+                self.outbox.push(json!({
+                    "cid": cid,
+                    "experiment": experiment_id,
+                    "protocol": protocol_id,
+                    "version": submission.pointer("/protocol/version").and_then(Value::as_u64).unwrap_or(1),
+                    "submitted_at": submission["submitted_at"],
+                    "state": "waiting",
+                    "attempts": 0,
+                    "last_attempt": Value::Null,
+                    "last_error": Value::Null,
+                }));
+                let at = self.outbox.len() - 1;
+                announce = self.announce_outbox(at, now);
+            } else {
+                announce = json!({ "sent": false, "error": "not on Logos Storage yet, so there is nothing to announce; publish it first" });
+            }
+        }
+
         let mut data = json!({
             "submitted": true,
             "missing": [],
@@ -2476,6 +3471,7 @@ impl Session {
             "submission": submission,
             "cid": cid,
             "index_page": indexed,
+            "announce": announce,
         });
         merge(&mut data, self.publish_report(&submission_key));
         api::envelope_ok(data)
@@ -3050,6 +4046,16 @@ fn local_path(raw: &str) -> String {
 /// host's per-instance directory (SPEC Q8).
 const STATE_FILE: &str = "state.json";
 
+/// How soon an unconfirmed submission is announced again, and the most the
+/// gap grows to.
+const OUTBOX_FIRST_GAP: chrono::Duration = chrono::Duration::minutes(3);
+const OUTBOX_MAX_GAP: chrono::Duration = chrono::Duration::hours(1);
+
+/// How long a results push may spend fetching photos it does not hold.
+/// Anything not fetched by then is listed as missing in the snapshot, and
+/// pushing again tries it again.
+const RESULTS_MEDIA_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
 const PUBLISH_BUDGET: std::time::Duration = std::time::Duration::from_secs(14);
 
 /// How much export text travels back to the UI for preview. Above this the
@@ -3261,6 +4267,10 @@ mod tests {
             thumbs_tried: Default::default(),
             send_failure: None,
             last_level: Default::default(),
+            approvals: BTreeMap::new(),
+            payouts: Vec::new(),
+            ledger: None,
+            outbox: Vec::new(),
             courier: None,
             seen: delivery::Seen::default(),
             receipts: BTreeMap::new(),
@@ -4978,6 +5988,479 @@ mod tests {
         assert_eq!(out["ok"], json!(false), "a wallet with a space was put in a document");
     }
 
+    // ---- rewards ----
+
+    /// A 32-byte account in the wallet's base58: thirty-one zero bytes then
+    /// `last`, which is enough to tell test accounts apart.
+    fn account(last: u8) -> String {
+        const A: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+        let mut n = last as u32;
+        let mut tail = String::new();
+        while n > 0 {
+            tail.insert(0, A[(n % 58) as usize] as char);
+            n /= 58;
+        }
+        "1".repeat(31) + &tail
+    }
+
+    fn account_hex_of(last: u8) -> String {
+        format!("{}{:02x}", "0".repeat(62), last)
+    }
+
+    /// A creator whose experiment offers 0.0005 per approved submission, up
+    /// to two per person, with received submissions from three people:
+    /// alice (wallet, three submissions), bob (no wallet), carol (wallet).
+    fn rewarding(scratch: &Scratch) -> (Session, String, std::sync::Arc<crate::rewards::MemoryLedger>) {
+        let mut s = publishing_in(scratch);
+        let made = data(&s.create(
+            &create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
+            at("2026-10-28T08:00:00Z"),
+        ));
+        let id = made["experiment"]["id"].as_str().unwrap().to_string();
+        let set = data(&s.set_reward(
+            &json!({ "experimentId": id, "amount": "0.0005", "maxPerSubmitter": 2 }).to_string(),
+        ));
+        assert_eq!(set["experiment"]["reward"]["amount"], json!("500000"), "{set}");
+
+        let people = [("alice", Some(account(1)), 3), ("bob", None, 1), ("carol", Some(account(3)), 1)];
+        let mut entries = Vec::new();
+        for (who, wallet, n) in people {
+            let key = format!("{:0>64}", hex::encode(who));
+            for i in 0..n {
+                let at = format!("2026-10-2{}T0{}:00:00Z", 5, i);
+                let mut doc = json!({
+                    "experiment": id, "protocol": { "id": "bird-sighting", "version": 1 },
+                    "submitter": { "key": key, "name": who }, "submitted_at": at, "values": {},
+                });
+                if let Some(w) = &wallet {
+                    doc["wallet"] = json!(w);
+                }
+                s.submissions.push(doc);
+                entries.push(json!({ "cid": format!("logos:z{who}{i}"), "submitter": key,
+                                     "submitted_at": at, "protocol": "bird-sighting" }));
+            }
+        }
+        s.index_pages.push(json!({ "experiment": id, "page": 1, "entries": entries, "hidden_keys": [] }));
+        let ledger = std::sync::Arc::new(crate::rewards::MemoryLedger::default());
+        ledger.balances.lock().unwrap().insert(account_hex_of(9), 10_000_000);
+        s.attach_ledger(Box::new(ledger.clone()));
+        (s, id, ledger)
+    }
+
+    fn approve(s: &mut Session, id: &str, cid: &str) {
+        let out = s.set_approval(&json!({ "experimentId": id, "cid": cid, "status": "approved" }).to_string());
+        assert_eq!(envelope(&out)["ok"], json!(true), "{out}");
+    }
+
+    const AFTER_END: &str = "2026-11-21T00:00:00Z";
+
+    fn plan(s: &Session, id: &str) -> Value {
+        data(&s.rewards_plan(&json!({ "experimentId": id, "from": account(9) }).to_string(), at(AFTER_END)))
+    }
+
+    fn pay(s: &mut Session, id: &str, payee: &Value) -> Value {
+        envelope(&s.rewards_pay(
+            &json!({ "experimentId": id, "from": account(9), "submitter": payee["submitter"],
+                     "cids": payee["submissions"], "amountLepta": payee["amount_lepta"] }).to_string(),
+            at(AFTER_END),
+        ))
+    }
+
+    #[test]
+    fn only_approved_submissions_with_a_wallet_are_paid_and_the_cap_holds() {
+        let scratch = Scratch::new("rewards-plan");
+        let (mut s, id, _) = rewarding(&scratch);
+        for cid in ["logos:zalice0", "logos:zalice1", "logos:zalice2", "logos:zbob0"] {
+            approve(&mut s, &id, cid);
+        }
+        let p = plan(&s, &id);
+        let payees = p["payees"].as_array().unwrap();
+        assert_eq!(payees.len(), 1, "{p}");
+        assert_eq!(payees[0]["name"], json!("alice"));
+        assert_eq!(payees[0]["count"], json!(2), "the cap of two was not applied");
+        assert_eq!(payees[0]["amount"], json!("0.001"));
+        assert_eq!(payees[0]["wallet_hex"], json!(account_hex_of(1)));
+        let reasons: Vec<&str> = p["skipped"].as_array().unwrap().iter()
+            .map(|r| r["reason"].as_str().unwrap()).collect();
+        assert!(reasons.iter().any(|r| r.contains("over the limit")), "{p}");
+        assert!(reasons.iter().any(|r| r.contains("wallet")), "{p}");
+        assert_eq!(p["pending"], json!(1), "carol's unreviewed submission");
+        assert_eq!(p["from"]["covers"], json!(true));
+    }
+
+    #[test]
+    fn paying_sends_once_records_it_and_never_pays_the_same_submission_twice() {
+        let scratch = Scratch::new("rewards-pay");
+        let (mut s, id, ledger) = rewarding(&scratch);
+        approve(&mut s, &id, "logos:zcarol0");
+        let payee = plan(&s, &id)["payees"][0].clone();
+
+        // Not before the end date.
+        let early = envelope(&s.rewards_pay(
+            &json!({ "experimentId": id, "from": account(9), "submitter": payee["submitter"],
+                     "cids": payee["submissions"], "amountLepta": payee["amount_lepta"] }).to_string(),
+            at("2026-11-01T00:00:00Z"),
+        ));
+        assert_eq!(early["ok"], json!(false));
+        assert!(ledger.sent.lock().unwrap().is_empty());
+
+        let paid = pay(&mut s, &id, &payee);
+        assert_eq!(paid["ok"], json!(true), "{paid}");
+        assert_eq!(paid["data"]["payout"]["state"], json!("sent"));
+        assert_eq!(*ledger.sent.lock().unwrap(), vec![(account_hex_of(9), account_hex_of(3), 500_000)]);
+
+        // Paying the same row again is refused, and carol drops off the plan.
+        let again = pay(&mut s, &id, &payee);
+        assert_eq!(again["ok"], json!(false));
+        assert_eq!(ledger.sent.lock().unwrap().len(), 1, "paid twice");
+        assert!(plan(&s, &id)["payees"].as_array().unwrap().is_empty());
+        // A paid submission can no longer be un-approved, nor the reward changed.
+        let undo = envelope(&s.set_approval(
+            &json!({ "experimentId": id, "cid": "logos:zcarol0", "status": "rejected" }).to_string()));
+        assert_eq!(undo["ok"], json!(false));
+        let change = envelope(&s.set_reward(&json!({ "experimentId": id, "amount": "1" }).to_string()));
+        assert_eq!(change["ok"], json!(false));
+
+        // And the record survives a restart.
+        s.save_state();
+        let again = empty_in(&scratch);
+        assert_eq!(again.payouts_of(&id).len(), 1);
+        assert!(again.paid_cids(&id).contains("logos:zcarol0"));
+    }
+
+    #[test]
+    fn a_plan_that_changed_since_review_is_not_paid() {
+        let scratch = Scratch::new("rewards-stale");
+        let (mut s, id, ledger) = rewarding(&scratch);
+        approve(&mut s, &id, "logos:zalice0");
+        let reviewed = plan(&s, &id)["payees"][0].clone();
+        approve(&mut s, &id, "logos:zalice1");
+        let out = pay(&mut s, &id, &reviewed);
+        assert_eq!(out["ok"], json!(false), "{out}");
+        assert!(out["error"]["message"].as_str().unwrap().contains("changed"));
+        assert!(ledger.sent.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_refused_transfer_is_recorded_and_can_be_retried() {
+        let scratch = Scratch::new("rewards-fail");
+        let (mut s, id, ledger) = rewarding(&scratch);
+        approve(&mut s, &id, "logos:zcarol0");
+        let payee = plan(&s, &id)["payees"][0].clone();
+        *ledger.fail_next.lock().unwrap() = Some("sequencer unreachable".into());
+        let out = pay(&mut s, &id, &payee);
+        assert_eq!(out["ok"], json!(false));
+        assert_eq!(out["error"]["payout"]["state"], json!("failed"));
+        // Failed means not paid: carol is owed again, and a retry works.
+        let payee = plan(&s, &id)["payees"][0].clone();
+        assert_eq!(pay(&mut s, &id, &payee)["ok"], json!(true));
+        assert_eq!(ledger.sent.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_unknown_outcome_blocks_further_payments_until_resolved() {
+        let scratch = Scratch::new("rewards-unknown");
+        let (mut s, id, ledger) = rewarding(&scratch);
+        approve(&mut s, &id, "logos:zcarol0");
+        approve(&mut s, &id, "logos:zalice0");
+        // As if the module died between recording and sending.
+        s.payouts.push(json!({ "id": "p1", "experiment": id, "state": "sending",
+                               "submissions": ["logos:zcarol0"] }));
+        let alice = plan(&s, &id)["payees"][0].clone();
+        assert_eq!(alice["name"], json!("alice"), "carol's unknown payment still counts as paid");
+        assert_eq!(pay(&mut s, &id, &alice)["ok"], json!(false));
+        assert!(ledger.sent.lock().unwrap().is_empty());
+
+        let resolved = envelope(&s.rewards_resolve(
+            &json!({ "experimentId": id, "payoutId": "p1", "outcome": "failed" }).to_string()));
+        assert_eq!(resolved["ok"], json!(true));
+        assert_eq!(plan(&s, &id)["payees"].as_array().unwrap().len(), 2, "carol is owed again");
+    }
+
+    #[test]
+    fn a_reward_is_public_validated_and_removable() {
+        let scratch = Scratch::new("rewards-set");
+        let (mut s, id, _) = rewarding(&scratch);
+        let manifest = &data(&s.get(&json!({ "experimentId": id }).to_string()))["experiment"];
+        assert!(schema::errors_as(manifest, schema::Kind::Experiment).is_empty());
+        assert!(crate::sign::verify(manifest).is_ok());
+        let bad = envelope(&s.set_reward(&json!({ "experimentId": id, "amount": "0.0000000001" }).to_string()));
+        assert!(bad["error"]["problems"]["amount"].is_string(), "{bad}");
+        let gone = data(&s.set_reward(&json!({ "experimentId": id, "amount": "" }).to_string()));
+        assert!(gone["experiment"].get("reward").is_none());
+    }
+
+    // ---- published results ----
+
+    /// A creator whose form has a count and photos, with `n` of their own
+    /// submissions received and indexed. Returns the CIDs in order.
+    fn with_photo_submissions(scratch: &Scratch, n: usize) -> (Session, String, Vec<String>) {
+        let mut s = publishing_in(scratch);
+        let now = at("2026-10-28T08:00:00Z");
+        let made = data(&s.create(&create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"), now));
+        let id = made["experiment"]["id"].as_str().unwrap().to_string();
+        let draft = json!({ "experimentId": id, "protocol": { "name": "Bird sighting", "fields": [
+            { "key": "count", "type": "number", "label": "How many", "required": true },
+            { "key": "photos", "type": "photo", "label": "Photos", "required": false, "config": { "min": 0, "max": 3 } }
+        ] } });
+        let saved = data(&s.save_protocol(&draft.to_string(), now));
+        let protocol_id = saved["protocol"]["id"].as_str().unwrap_or("bird-sighting").to_string();
+        let (_, url) = photo_on_disk(scratch);
+        let mut cids = Vec::new();
+        for i in 0..n {
+            let photo = data(&s.add_photo(&json!({ "path": url }).to_string()))["entry"].clone();
+            let out = data(&s.submit(
+                &json!({ "experimentId": id, "protocolId": protocol_id,
+                         "values": { "count": i + 1, "photos": [photo] } }).to_string(),
+                at(&format!("2026-10-28T09:0{i}:00Z")),
+            ));
+            cids.push(out["cid"].as_str().expect("indexed").to_string());
+        }
+        (s, id, cids)
+    }
+
+    fn push(s: &mut Session, id: &str) -> Value {
+        let protocol = s.protocols[0]["id"].as_str().unwrap().to_string();
+        envelope(&s.publish_results(
+            &json!({ "experimentId": id, "protocolId": protocol }).to_string(),
+            at("2026-10-29T10:00:00Z"),
+        ))
+    }
+
+    #[test]
+    fn pushing_publishes_only_approved_rows_with_the_experiment_and_form_as_signed() {
+        let scratch = Scratch::new("results-push");
+        let (mut s, id, cids) = with_photo_submissions(&scratch, 3);
+        approve(&mut s, &id, &cids[0]);
+        approve(&mut s, &id, &cids[2]);
+        s.set_approval(&json!({ "experimentId": id, "cid": cids[1], "status": "rejected" }).to_string());
+
+        let out = push(&mut s, &id);
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let cid = out["data"]["cid"].as_str().unwrap();
+        assert_eq!(out["data"]["rows"], json!(2));
+        // Both rows carry the same photo file, which cleans to the same bytes
+        // and so the same CID: counted once, held once.
+        assert_eq!(out["data"]["media"], json!({ "named": 1, "held": 1 }), "{out}");
+
+        // What Storage holds is a valid, signed snapshot whose parts verify alone.
+        let bytes = s.store.as_deref().unwrap().get(store::bare_cid(cid), true).unwrap();
+        let doc: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(schema::errors_as(&doc, schema::Kind::Results).is_empty(), "{:?}", schema::errors_as(&doc, schema::Kind::Results));
+        // Like a protocol or an index page, the snapshot names no signer of
+        // its own: it is signed by the experiment's creator, whose key the
+        // embedded manifest carries.
+        let creator = doc.pointer("/experiment/creator/key").and_then(Value::as_str).unwrap();
+        let mut key = [0u8; 32];
+        hex::decode_to_slice(creator, &mut key).unwrap();
+        assert!(crate::sign::verify_with(&doc, &key).is_ok(), "the snapshot is not the creator's");
+        assert!(crate::sign::verify(&doc["experiment"]).is_ok());
+        assert!(crate::sign::verify_with(&doc["protocol"], &key).is_ok());
+        let published: Vec<&str> = doc["rows"].as_array().unwrap().iter()
+            .map(|r| { assert!(crate::sign::verify(&r["submission"]).is_ok()); r["cid"].as_str().unwrap() })
+            .collect();
+        assert_eq!(published, vec![cids[0].as_str(), cids[2].as_str()], "a rejected row was published");
+
+        // And the experiment now points at it.
+        let manifest = &data(&s.get(&json!({ "experimentId": id }).to_string()))["experiment"];
+        assert_eq!(manifest["results"][0]["cid"], json!(cid));
+        assert!(schema::errors_as(manifest, schema::Kind::Experiment).is_empty());
+    }
+
+    #[test]
+    fn pushing_again_links_to_the_previous_snapshot() {
+        let scratch = Scratch::new("results-again");
+        let (mut s, id, cids) = with_photo_submissions(&scratch, 2);
+        approve(&mut s, &id, &cids[0]);
+        let first = push(&mut s, &id)["data"]["cid"].clone();
+        approve(&mut s, &id, &cids[1]);
+        let second = push(&mut s, &id);
+        assert_eq!(second["data"]["prev"], first, "{second}");
+        assert_eq!(second["data"]["rows"], json!(2));
+        let manifest = &data(&s.get(&json!({ "experimentId": id }).to_string()))["experiment"];
+        assert_eq!(manifest["results"].as_array().unwrap().len(), 1, "one entry per form, the newest");
+        assert_eq!(manifest["results"][0]["cid"], second["data"]["cid"]);
+    }
+
+    #[test]
+    fn nothing_approved_means_nothing_is_pushed() {
+        let scratch = Scratch::new("results-none");
+        let (mut s, id, _) = with_photo_submissions(&scratch, 1);
+        let out = push(&mut s, &id);
+        assert_eq!(out["ok"], json!(false));
+        assert!(out["error"]["message"].as_str().unwrap().contains("approved"), "{out}");
+    }
+
+    #[test]
+    fn a_photo_nobody_holds_is_listed_as_missing_not_hidden() {
+        let scratch = Scratch::new("results-missing");
+        let (mut s, id, cids) = with_photo_submissions(&scratch, 1);
+        // The submission names a photo that is nowhere: swap in a store
+        // that has the documents but not the photo.
+        let photo_cid = s.submissions[0]["values"]["photos"][0]["cid"].as_str().unwrap().to_string();
+        let old = s.store.take().unwrap();
+        let fresh = crate::store::MemoryStore::new();
+        for doc in s.submissions.iter().chain(s.protocols.iter()) {
+            let _ = crate::store::publish(&fresh, "doc", doc);
+        }
+        drop(old);
+        s.attach_store(Box::new(fresh));
+        approve(&mut s, &id, &cids[0]);
+        let out = push(&mut s, &id);
+        assert_eq!(out["ok"], json!(true), "{out}");
+        assert_eq!(out["data"]["media"]["held"], json!(0));
+        assert_eq!(out["data"]["media"]["missing"], json!([photo_cid]));
+    }
+
+    #[test]
+    fn only_the_creator_can_push_and_storage_is_required() {
+        let scratch = Scratch::new("results-who");
+        let (mut s, id, cids) = with_photo_submissions(&scratch, 1);
+        approve(&mut s, &id, &cids[0]);
+        let mine = s.creator_key.clone();
+        s.creator_key = "3a".repeat(32);
+        assert_eq!(push(&mut s, &id)["ok"], json!(false));
+        s.creator_key = mine;
+        s.store = None;
+        assert_eq!(push(&mut s, &id)["error"]["code"], json!(api::code::NOT_WIRED));
+    }
+
+    // ---- joining by link, outbox, receipts ----
+
+    /// A creator with a published experiment and form, and a submitter on a
+    /// separate node that shares the creator's Storage and has its own
+    /// Delivery client. Messages between them are carried by hand.
+    fn two_nodes(
+        creator_dir: &Scratch,
+        submitter_dir: &Scratch,
+    ) -> (Session, Session, String, String, std::sync::Arc<crate::delivery::MemoryCourier>, std::sync::Arc<crate::delivery::MemoryCourier>) {
+        let (creator, id, store, creator_courier) = creator_with_delivery(creator_dir);
+        let link = data(&creator.list(at("2026-10-28T08:00:00Z")))["experiments"][0]["link"]
+            .as_str().unwrap().to_string();
+        let mut submitter = empty_in(submitter_dir);
+        submitter.attach_store(Box::new(SharedStore(store)));
+        let submitter_courier = std::sync::Arc::new(crate::delivery::MemoryCourier::new());
+        submitter.attach_courier(Box::new(SharedCourier(submitter_courier.clone())));
+        (creator, submitter, id, link, creator_courier, submitter_courier)
+    }
+
+    fn open(s: &mut Session, link: &str) -> Value {
+        envelope(&s.open_link(&json!({ "link": link }).to_string()))
+    }
+
+    #[test]
+    fn a_link_brings_the_experiment_and_its_forms_checked_and_watched() {
+        let (a, b) = (Scratch::new("join-c"), Scratch::new("join-s"));
+        let (_creator, mut submitter, id, link, _, submitter_courier) = two_nodes(&a, &b);
+        let out = open(&mut submitter, &link);
+        assert_eq!(out["ok"], json!(true), "{out}");
+        assert_eq!(out["data"]["experiment"]["id"], json!(id));
+        assert_eq!(out["data"]["protocols"].as_array().unwrap().len(), 1, "the form did not come with it");
+        assert_eq!(out["data"]["missing_forms"], json!([]));
+        assert!(submitter_courier.subscriptions().contains(&crate::delivery::topic(&id)),
+                "joined without watching the topic, so no receipt could ever arrive");
+        // It is on the dashboard as one to contribute to, not one of ours.
+        let card = &data(&submitter.list(at("2026-10-28T08:00:00Z")))["experiments"][0];
+        assert_eq!(card["mine"], json!(false));
+        // Opening it again is harmless.
+        assert_eq!(open(&mut submitter, &link)["ok"], json!(true));
+        assert_eq!(submitter.experiments.len(), 1);
+    }
+
+    #[test]
+    fn a_tampered_or_foreign_link_is_refused() {
+        let (a, b) = (Scratch::new("join-bad-c"), Scratch::new("join-bad-s"));
+        let (_creator, mut submitter, id, link, _, _) = two_nodes(&a, &b);
+        assert_eq!(open(&mut submitter, "https://example.org/x")["ok"], json!(false));
+        // A link whose id does not match the document it points at.
+        let other_id = if id.starts_with('a') { format!("b{}", &id[1..]) } else { format!("a{}", &id[1..]) };
+        let wrong = link.replace(&id, &other_id);
+        let out = open(&mut submitter, &wrong);
+        assert_eq!(out["ok"], json!(false), "{out}");
+        assert!(submitter.experiments.is_empty());
+        // A manifest CID nobody holds.
+        let missing = format!("logos-collect://exp/{id}?m=logos:zNothingHere");
+        assert_eq!(open(&mut submitter, &missing)["ok"], json!(false));
+    }
+
+    #[test]
+    fn a_submission_is_announced_kept_in_the_outbox_and_settled_by_the_creators_receipt() {
+        let (a, b) = (Scratch::new("outbox-c"), Scratch::new("outbox-s"));
+        let (mut creator, mut submitter, id, link, creator_courier, submitter_courier) = two_nodes(&a, &b);
+        assert_eq!(open(&mut submitter, &link)["ok"], json!(true));
+
+        let out = data(&submitter.submit(&submit_request(&id, 4), at("2026-10-28T09:00:00Z")));
+        assert_eq!(out["announce"]["sent"], json!(true), "{out}");
+        let cid = out["cid"].as_str().unwrap().to_string();
+        let mine = data(&submitter.submissions_mine(&json!({ "experimentId": id }).to_string()));
+        assert_eq!(mine["submissions"][0]["state"], json!("waiting"));
+
+        // The announcement reaches the creator, who indexes it and receipts.
+        let announcement = submitter_courier.messages().last().cloned().unwrap();
+        assert_eq!(announcement["kind"], json!("submission"));
+        let handled = data(&creator.deliver(&arriving(&id, &announcement, "0xsub1"), at("2026-10-28T09:01:00Z")));
+        assert_eq!(handled["handled"], json!(true), "{handled}");
+        let receipt = creator_courier.messages().into_iter().rev()
+            .find(|m| m["kind"] == json!("receipt")).expect("a receipt was sent");
+
+        // The receipt reaches the submitter and settles the outbox.
+        let got = data(&submitter.deliver(&arriving(&id, &receipt, "0xrcpt1"), at("2026-10-28T09:02:00Z")));
+        assert_eq!(got["handled"], json!(true), "{got}");
+        let mine = data(&submitter.submissions_mine(&json!({ "experimentId": id }).to_string()));
+        assert_eq!(mine["submissions"][0]["state"], json!("received"));
+        assert_eq!(mine["submissions"][0]["cid"], json!(cid));
+    }
+
+    #[test]
+    fn a_receipt_from_anyone_but_the_creator_settles_nothing() {
+        let (a, b) = (Scratch::new("outbox-forged-c"), Scratch::new("outbox-forged-s"));
+        let (_creator, mut submitter, id, link, _, _) = two_nodes(&a, &b);
+        open(&mut submitter, &link);
+        let out = data(&submitter.submit(&submit_request(&id, 1), at("2026-10-28T09:00:00Z")));
+        let cid = out["cid"].as_str().unwrap();
+        let stranger = Scratch::new("outbox-stranger");
+        let stranger_key = Identity::load_or_create(stranger.0.as_path()).unwrap().public_hex();
+        let forged = signed_by(&stranger, crate::delivery::receipt(&id, &stranger_key, cid, 1, "2026-10-28T09:05:00Z"));
+        let got = data(&submitter.deliver(&arriving(&id, &forged, "0xforged"), at("2026-10-28T09:05:00Z")));
+        assert_eq!(got["reason"], json!("not_the_creator"), "{got}");
+        let mine = data(&submitter.submissions_mine("{}"));
+        assert_eq!(mine["submissions"][0]["state"], json!("waiting"));
+    }
+
+    #[test]
+    fn an_unconfirmed_submission_is_announced_again_with_growing_gaps_and_survives_a_restart() {
+        let (a, b) = (Scratch::new("outbox-resend-c"), Scratch::new("outbox-resend-s"));
+        let (_creator, mut submitter, id, link, _, submitter_courier) = two_nodes(&a, &b);
+        open(&mut submitter, &link);
+        submitter.submit(&submit_request(&id, 1), at("2026-10-28T09:00:00Z"));
+        let sent = || submitter_courier.messages().iter().filter(|m| m["kind"] == json!("submission")).count();
+        assert_eq!(sent(), 1);
+
+        submitter.drain(at("2026-10-28T09:01:00Z"));
+        assert_eq!(sent(), 1, "re-sent before the first gap");
+        submitter.drain(at("2026-10-28T09:03:00Z"));
+        assert_eq!(sent(), 2, "not re-sent after three minutes");
+        submitter.drain(at("2026-10-28T09:07:00Z"));
+        assert_eq!(sent(), 2, "the second gap did not grow");
+        submitter.drain(at("2026-10-28T09:09:00Z"));
+        assert_eq!(sent(), 3);
+
+        submitter.save_state();
+        let again = empty_in(&b);
+        let mine = data(&again.submissions_mine("{}"));
+        assert_eq!(mine["submissions"][0]["state"], json!("waiting"), "the outbox was lost on restart");
+        assert_eq!(mine["submissions"][0]["attempts"], json!(3));
+    }
+
+    #[test]
+    fn a_creators_own_submission_needs_no_outbox() {
+        let scratch = Scratch::new("outbox-own");
+        let (mut s, id) = creator_ready_to_submit(&scratch);
+        let out = data(&s.submit(&submit_request(&id, 2), at("2026-10-28T09:00:00Z")));
+        assert_eq!(out["announce"], Value::Null);
+        assert!(s.outbox.is_empty());
+    }
+
     #[test]
     fn a_creator_can_submit_to_their_own_experiment() {
         // An ordinary submitter, not a special case: same validation, same
@@ -5391,6 +6874,10 @@ mod tests {
             thumbs_tried: Default::default(),
             send_failure: None,
             last_level: Default::default(),
+            approvals: BTreeMap::new(),
+            payouts: Vec::new(),
+            ledger: None,
+            outbox: Vec::new(),
             courier: None,
             seen: delivery::Seen::default(),
             receipts: BTreeMap::new(),
@@ -5424,6 +6911,10 @@ mod tests {
             thumbs_tried: Default::default(),
             send_failure: None,
             last_level: Default::default(),
+            approvals: BTreeMap::new(),
+            payouts: Vec::new(),
+            ledger: None,
+            outbox: Vec::new(),
             courier: None,
             seen: delivery::Seen::default(),
             receipts: BTreeMap::new(),
@@ -5544,6 +7035,10 @@ mod tests {
             thumbs_tried: Default::default(),
             send_failure: None,
             last_level: Default::default(),
+            approvals: BTreeMap::new(),
+            payouts: Vec::new(),
+            ledger: None,
+            outbox: Vec::new(),
             courier: None,
             seen: delivery::Seen::default(),
             receipts: BTreeMap::new(),

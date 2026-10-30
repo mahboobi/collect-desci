@@ -5,8 +5,12 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-qtd="${QT_QML_ROOT:-$(ls -d /nix/store/*-qtdeclarative-6.*/ 2>/dev/null | head -1)}"
-qtb="$(ls -d /nix/store/*-qtbase-6.*/ 2>/dev/null | grep -v -- -dev | grep -v only-plugins | head -1)"
+# The Qt Basecamp ships (6.9.2 in Basecamp 0.3.2), not whichever is first in
+# the store: a newer Qt accepts QML that Basecamp refuses, which is how
+# `function short()` — a reserved word in 6.9 — passed here and failed there.
+QT_VERSION="${QT_VERSION:-6.9.2}"
+qtd="${QT_QML_ROOT:-$(ls -d /nix/store/*-qtdeclarative-${QT_VERSION}/ 2>/dev/null | head -1)}"
+qtb="$(ls -d /nix/store/*-qtbase-${QT_VERSION}/ 2>/dev/null | head -1)"
 
 if [ -z "$qtd" ] || [ ! -x "$qtd/bin/qmltestrunner" ]; then
   echo "no Qt 6 qmltestrunner found; set QT_QML_ROOT to a qtdeclarative prefix" >&2

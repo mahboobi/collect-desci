@@ -29,6 +29,7 @@ use collect_core_logic::{api, delivery::Courier, session::Session, store::Docume
 // this crate that can be compiled outside the Nix build (it does not touch
 // the generated scaffold) — see its own docs.
 mod courier;
+mod lez;
 mod storage;
 
 /// Collect's core: documents, signing, validation, media and indexing.
@@ -221,6 +222,16 @@ impl Collect {
     fn session(&mut self) -> &mut Session {
         self.platform();
         self.session.get_or_insert_with(Session::new)
+    }
+
+    /// Attach the LEZ wallet the first time a rewards call needs it. Only
+    /// then, never at start: a rewards call is something the creator chose,
+    /// and the first call to a module nothing has loaded can wait for it.
+    fn ledger(&mut self) {
+        let session = self.session();
+        if !session.has_ledger() {
+            session.attach_ledger(Box::new(lez::LezLedger::connect()));
+        }
     }
 
     /// The session without trying to reach another module.
@@ -555,6 +566,8 @@ impl CollectCoreModule for Collect {
             "identity.me" => self.identity_me(),
             "experiments.list" => self.session().list(now),
             "experiments.get" => self.session().get(&request),
+            "experiments.open" => self.session().open_link(&request),
+            "submissions.mine" => self.session().submissions_mine(&request),
             "experiments.create" => self.session().create(&request, now),
             "protocols.saveDraft" => self.session().save_protocol(&request, now),
             "results.list" => self.session().results(&request),
@@ -563,6 +576,22 @@ impl CollectCoreModule for Collect {
             "experiments.setThumbnail" => self.session().set_thumbnail(&request),
             "experiments.clearThumbnail" => self.session().clear_thumbnail(&request),
             "media.addPhoto" => self.session().add_photo(&request),
+            "experiments.setReward" => self.session().set_reward(&request),
+            "results.setApproval" => self.session().set_approval(&request),
+            "results.publish" => self.session().publish_results(&request, now),
+            "rewards.plan" => {
+                self.ledger();
+                self.session().rewards_plan(&request, now)
+            }
+            "rewards.pay" => {
+                self.ledger();
+                self.session().rewards_pay(&request, now)
+            }
+            "rewards.refresh" => {
+                self.ledger();
+                self.session().rewards_refresh(&request)
+            }
+            "rewards.resolve" => self.session().rewards_resolve(&request),
             "submitters.hide" => self.session().set_hidden(&request, true, now),
             "submitters.show" => self.session().set_hidden(&request, false, now),
             "results.export" => self.session().export(&request, now),

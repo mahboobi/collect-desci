@@ -4,7 +4,7 @@ Standing instructions for every Claude Code session in this repository. The prod
 
 ## What we are building
 
-A small Basecamp app. A creator defines an experiment with dates and one or more data collection forms (protocols). Submitters with Basecamp open the link and fill in a form. Every document is signed and stored publicly on Logos Storage; Logos Delivery carries announcements. No blockchain, no tokens or payments in v1.
+A small Basecamp app. A creator defines an experiment with dates and one or more data collection forms (protocols). Submitters with Basecamp open the link and fill in a form. Every document is signed and stored publicly on Logos Storage; Logos Delivery carries announcements. An experiment may offer a LEZ TestToken reward per approved submission, paid by the creator after it ends (SPEC section 11).
 
 Each person also has a **science profile** (top right) and each project has a **discussion** (SPEC section 10). Neither is ever written to Logos Storage: the profile stays on the device, shared profile fields are sealed per recipient (X25519 + ChaCha20-Poly1305, `core/src/seal.rs`) and travel on the experiment's Delivery topic, and messages travel on the same topic and are kept in a local history. Documents themselves stay unencrypted.
 
@@ -119,7 +119,12 @@ is not copied. See `docs/api-verification.md` round 3.
   - Delivery: https://logos-co.github.io/logos-delivery-module/latest/pages/api_reference.html
   - Core modules: https://docs.logos.co/core/build-modules/build-and-run-a-logos-core-module
   - Scaffold: https://docs.logos.co/build-an-app/scaffold/about-logos-scaffold
-- Do not add a blockchain, tokens or payments in v1. A wallet *address* in the profile is self-description, not a payment feature.
+- Payments exist in one place only: rewards (SPEC section 11, decided 30 October 2026, which lifted the v1 no-payments rule). LEZ TestToken on the LEZ testnet, paid by the creator through the `lez_core` wallet with `transfer_public`. Rules that must hold:
+  - Nothing pays on its own. Every payment follows the creator ticking a confirmation on the Pay rewards screen, and only after `ends_at`.
+  - `rewards.pay` pays one submitter per call and re-checks that row against a freshly built plan; a stale plan is refused.
+  - A payout is written to `state.json` as `sending` **before** the transfer; an unknown outcome blocks further payments until the creator resolves it. Never pay a CID that any non-failed payout names.
+  - `lez_core` is called by name and never declared in metadata.json (8b). Collect never opens, creates or unlocks a wallet, and never sees a key.
+  - Approvals are local to the creator's node, until the creator presses "Push to Logos Storage": the published `collect/results@1` holds approved rows only, so its contents reveal which were approved (decided 30 October 2026).
 - Encryption is for sealed profile fields only (`seal.rs`). Do not add another scheme, and do not encrypt documents.
 - Personal data lives only in the profile. It never goes into a document, never onto Logos Storage, and never onto Delivery in the clear: each field leaves the device only when its own `share` switch is on, sealed for each member separately. Submissions still carry only the optional public display name and, when the submitter ticks the box on that form, their wallet address (decided 30 October 2026). The address is read from their own profile in `collect_core`, never taken from the UI, and the box starts unticked on every form.
 - Do not put anything in a `message` that is not the person's own typed text: messages are readable by anyone with the experiment's link.

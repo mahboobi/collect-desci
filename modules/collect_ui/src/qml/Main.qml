@@ -41,6 +41,22 @@ Item {
     // collect_core answers, which is also the truth before then.
     property var connection: ({ level: "offline", reason: "Connecting to collect_core\u2026" })
     property bool refreshing: false
+    // ---- rewards ----
+    // The detail page's reward form, and the Pay rewards screen.
+    property bool joinRewardBusy: false
+    // Joining by link, and this node's submissions to the open experiment.
+    property bool joinBusy: false
+    property string joinError: ""
+    property var mySubmissions: []
+    // The Results screen's push to Logos Storage.
+    property var pushResult: null
+    property bool pushing: false
+    property var joinRewardProblems: ({})
+    property var rewardPlan: null
+    property bool rewardBusy: false
+    property var rewardProgress: ({})
+    property string rewardFrom: ""
+
     // The last send failure put in the banner, so a repeat is not.
     property string lastSendFailure: ""
     property var createProblems: ({})
@@ -238,6 +254,7 @@ Item {
             app.openCid = data.cid ? data.cid : "";
             app.openPublishError = data.publish_error ? data.publish_error : null;
             app.openThumbnail = data.thumbnail ? data.thumbnail : "";
+            app.loadMySubmissions();
             app.page = "detail";
         });
     }
@@ -378,8 +395,10 @@ Item {
                  function (data) {
                      app.resultsData = data;
                      app.resultsProtocolId = protocolId;
-                     if (fresh)
+                     if (fresh) {
                          app.exportResult = null;
+                         app.pushResult = null;
+                     }
                      app.page = "results";
                  });
     }
@@ -496,6 +515,152 @@ Item {
         app.refreshList();
     }
 
+    // ---- joining and the outbox ----
+
+    function joinLink(link) {
+        app.joinBusy = true;
+        app.joinError = "";
+        app.callEnvelope("experiments.open", { link: link }, function (e) {
+            app.joinBusy = false;
+            if (!e.ok) {
+                app.joinError = e.error && e.error.message ? e.error.message : "That link could not be opened.";
+                return;
+            }
+            app.refreshList();
+            var missing = e.data.missing_forms ? e.data.missing_forms : [];
+            if (missing.length > 0)
+                Core.reportFailure(missing.length + (missing.length === 1 ? " form" : " forms")
+                                   + " could not be fetched yet; open the link again later to try.");
+            app.openExperiment(e.data.experiment.id, false);
+        });
+    }
+
+    function loadMySubmissions() {
+        if (app.openMine || app.openExperimentId === "") {
+            app.mySubmissions = [];
+            return;
+        }
+        app.callQuietly("submissions.mine", { experimentId: app.openExperimentId }, function (d) {
+            app.mySubmissions = d.submissions ? d.submissions : [];
+        });
+    }
+
+    // ---- push results to Logos Storage ----
+
+    function pushResults() {
+        app.pushing = true;
+        app.pushResult = null;
+        app.callEnvelope("results.publish",
+                         { experimentId: app.openExperimentId, protocolId: app.resultsProtocolId },
+                         function (e) {
+                             app.pushing = false;
+                             app.pushResult = e;
+                             if (!e.ok)
+                                 return;
+                             // A new manifest version lists the snapshot;
+                             // reload it quietly so "last published" follows.
+                             app.callQuietly("experiments.get", { experimentId: app.openExperimentId },
+                                             function (d) { Core.experimentDoc = d.experiment; });
+                             app.refreshList();
+                         });
+    }
+
+    // ---- rewards ----
+
+    function setReward(amount, maxPerSubmitter) {
+        app.joinRewardBusy = true;
+        app.joinRewardProblems = ({});
+        app.callEnvelope("experiments.setReward",
+                         { experimentId: app.openExperimentId, amount: amount, maxPerSubmitter: maxPerSubmitter },
+                         function (e) {
+                             app.joinRewardBusy = false;
+                             if (e.ok) {
+                                 app.openExperiment(app.openExperimentId, app.openMine);
+                                 app.refreshList();
+                                 return;
+                             }
+                             if (e.error && e.error.problems)
+                                 app.joinRewardProblems = e.error.problems;
+                             else
+                                 Core.reportFailure(e.error ? e.error.message : "The reward was not changed.");
+                         });
+    }
+
+    function setApproval(cid, status) {
+        app.resultsBusy = true;
+        app.callEnvelope("results.setApproval",
+                         { experimentId: app.openExperimentId, cid: cid, status: status },
+                         function (e) {
+                             app.resultsBusy = false;
+                             if (!e.ok)
+                                 Core.reportFailure(e.error ? e.error.message : "That review was not saved.");
+                             app.openResults(app.resultsProtocolId, false);
+                         });
+    }
+
+    /// The paying account defaults to the wallet in the creator's profile,
+    /// which is usually their own LEZ address.
+    function openRewards() {
+        if (app.rewardFrom === "" && app.profileData && app.profileData.fields
+                && app.profileData.fields.wallet && app.profileData.fields.wallet.value)
+            app.rewardFrom = app.profileData.fields.wallet.value;
+        app.rewardProgress = ({});
+        app.loadRewardPlan(function () { app.page = "rewards"; });
+    }
+
+    function loadRewardPlan(then) {
+        app.rewardBusy = true;
+        app.callEnvelope("rewards.plan", { experimentId: app.openExperimentId, from: app.rewardFrom },
+                         function (e) {
+                             app.rewardBusy = false;
+                             if (!e.ok) {
+                                 Core.reportFailure(e.error ? e.error.message : "The payout plan could not be made.");
+                                 return;
+                             }
+                             app.rewardPlan = e.data;
+                             if (then)
+                                 then();
+                         });
+    }
+
+    /// One payment per call, one after another, each exactly as shown. A
+    /// refusal stops the run: whatever caused it — the plan changed, the
+    /// wallet closed — is worth looking at before paying anyone else.
+    function payRewards(from) {
+        if (!app.rewardPlan || app.rewardBusy)
+            return;
+        var queue = app.rewardPlan.payees.slice();
+        app.rewardBusy = true;
+        var mark = function (key, state) {
+            var next = Object.assign({}, app.rewardProgress);
+            next[key] = state;
+            app.rewardProgress = next;
+        };
+        var step = function () {
+            if (queue.length === 0) {
+                app.rewardBusy = false;
+                app.loadRewardPlan(null);
+                return;
+            }
+            var p = queue.shift();
+            mark(p.submitter, "paying");
+            app.callEnvelope("rewards.pay", {
+                experimentId: app.openExperimentId, from: from, submitter: p.submitter,
+                cids: p.submissions, amountLepta: p.amount_lepta
+            }, function (e) {
+                if (e.ok) {
+                    mark(p.submitter, "paid");
+                    step();
+                    return;
+                }
+                mark(p.submitter, "failed: " + (e.error ? e.error.message : "refused"));
+                app.rewardBusy = false;
+                app.loadRewardPlan(null);
+            });
+        };
+        step();
+    }
+
     function refreshList() {
         app.call("experiments.list", {}, function (data) {
             Core.cards = data.experiments ? data.experiments : [];
@@ -575,6 +740,7 @@ Item {
             case "results":   return resultsPage;
             case "profile":   return profilePage;
             case "discussion": return discussionPage;
+            case "rewards":   return rewardsPage;
             default:          return homePage;
             }
         }
@@ -585,6 +751,9 @@ Item {
 
         Home {
             cards: Core.cards
+            joinBusy: app.joinBusy
+            joinError: app.joinError
+            onJoinLink: function (link) { app.joinLink(link); }
             connection: app.connection
             refreshing: app.refreshing
             onRefresh: app.refreshAll()
@@ -610,6 +779,11 @@ Item {
             thumbnailBusy: app.thumbnailBusy
             thumbnailError: app.thumbnailError
             onPickThumbnail: function (url) { app.setThumbnail(url); }
+            rewardBusy: app.joinRewardBusy
+            rewardProblems: app.joinRewardProblems
+            onSetReward: function (amount, maxPerSubmitter) { app.setReward(amount, maxPerSubmitter); }
+            onOpenRewards: app.openRewards()
+            mySubmissions: app.mySubmissions
             nativePicker: app.nativePicker
             onRequestThumbnailPick: app.backend.pickImage("thumbnail", "Choose a cover image")
             onClearThumbnail: app.clearThumbnail()
@@ -753,6 +927,7 @@ Item {
             onSubmitted: function (cid) {
                 app.lastCid = cid;
                 app.receiptSeen = false;
+                app.loadMySubmissions();
                 app.page = "submitted";
             }
             onCancelled: app.page = "detail"
@@ -822,6 +997,52 @@ Item {
             }
             onHideSubmitter: function (key) { app.setHidden(key, true); }
             onShowSubmitter: function (key) { app.setHidden(key, false); }
+            rewarding: Core.rewardOf(Core.experimentDoc) !== null
+            onSetApproval: function (cid, status) { app.setApproval(cid, status); }
+            published: {
+                var list = Core.experimentDoc && Core.experimentDoc.results ? Core.experimentDoc.results : [];
+                for (var i = 0; i < list.length; i++)
+                    if (list[i].protocol === app.resultsProtocolId)
+                        return list[i];
+                return null;
+            }
+            pushResult: app.pushResult
+            pushing: app.pushing
+            onPushToStorage: app.pushResults()
+        }
+    }
+
+    Component {
+        id: rewardsPage
+
+        Rewards {
+            experiment: Core.experimentDoc
+            plan: app.rewardPlan
+            busy: app.rewardBusy
+            progress: app.rewardProgress
+            fromAddress: app.rewardFrom
+            onBack: app.page = "detail"
+            onCheckFrom: function (address) {
+                app.rewardFrom = address;
+                app.loadRewardPlan(null);
+            }
+            onPayAll: function (address) { app.payRewards(address); }
+            onRefresh: {
+                app.rewardBusy = true;
+                app.callEnvelope("rewards.refresh", { experimentId: app.openExperimentId }, function () {
+                    app.rewardBusy = false;
+                    app.loadRewardPlan(null);
+                });
+            }
+            onResolve: function (payoutId, outcome) {
+                app.callEnvelope("rewards.resolve",
+                                 { experimentId: app.openExperimentId, payoutId: payoutId, outcome: outcome },
+                                 function (e) {
+                                     if (!e.ok)
+                                         Core.reportFailure(e.error ? e.error.message : "Not resolved.");
+                                     app.loadRewardPlan(null);
+                                 });
+            }
         }
     }
 
@@ -954,6 +1175,9 @@ Item {
             }
             if (talk && app.page === "discussion")
                 app.loadDiscussion(null);
+            var outboxMoved = data.resent > 0 || seen.some(function (r) { return r.kind === "receipt"; });
+            if (outboxMoved && app.page === "detail")
+                app.loadMySubmissions();
             if (then)
                 then();
         });

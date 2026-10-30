@@ -201,6 +201,29 @@ QtObject {
     /// fixtures, where the button says it cannot add photos here.
     property var photoAdder: null
 
+    /// Lepta (10^9 per token, as a decimal string) as tokens: "500000" →
+    /// "0.0005". String arithmetic only — lepta figures pass 2^53, where a
+    /// JavaScript number starts dropping digits.
+    function formatLepta(lepta) {
+        var s = String(lepta === undefined || lepta === null ? "0" : lepta).replace(/^0+/, "");
+        if (s === "" || !/^[0-9]+$/.test(s))
+            return "0";
+        while (s.length < 10)
+            s = "0" + s;
+        var whole = s.slice(0, s.length - 9).replace(/^0+/, "") || "0";
+        var frac = s.slice(s.length - 9).replace(/0+$/, "");
+        return frac === "" ? whole : whole + "." + frac;
+    }
+
+    /// The reward an experiment offers, ready to show, or null.
+    function rewardOf(experiment) {
+        var r = experiment && experiment.reward ? experiment.reward : null;
+        if (!r || r.token !== "lez:testnet")
+            return null;
+        return { amount: core.formatLepta(r.amount), lepta: r.amount,
+                 max: r.max_per_submitter, symbol: "TestToken" };
+    }
+
     function submit(draft, onDone) {
         if (!core.submitter) {
             onDone({ ok: false, error: { code: "not_wired", message: "collect_core is not reachable yet" } });

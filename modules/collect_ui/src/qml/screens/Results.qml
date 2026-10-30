@@ -27,6 +27,26 @@ Flickable {
     signal exportRequested(string format, bool includeMedia)
     signal hideSubmitter(string key)
     signal showSubmitter(string key)
+    /// approved, rejected or pending (to undo a decision).
+    signal setApproval(string cid, string status)
+
+    /// Whether the experiment offers a reward. The review column is there
+    /// either way — approving is useful on its own — but it says what an
+    /// approval leads to only when it leads somewhere.
+    property bool rewarding: false
+    readonly property int reviewWidth: 190
+
+    // ---- push to Logos Storage ----
+    /// The experiment manifest's entry for this form's last published
+    /// snapshot ({cid, rows, published_at}), or null.
+    property var published: null
+    /// The last push's answer: {ok, data} or {ok: false, error}.
+    property var pushResult: null
+    property bool pushing: false
+    signal pushToStorage()
+    readonly property int approvedCount: screen.rows.filter(function (r) {
+        return r.approval === "approved";
+    }).length
 
     readonly property var columns: screen.results && screen.results.columns ? screen.results.columns : []
     readonly property var rows: screen.results && screen.results.rows ? screen.results.rows : []
@@ -129,6 +149,121 @@ Flickable {
             }
         }
 
+        // ---- push to Logos Storage ----
+        // The creator's final, public dataset for this form: approved rows
+        // only, with the experiment and the form. Every cost is the
+        // creator's — their node fetches and keeps every photo first.
+        Rectangle {
+            objectName: "pushCard"
+            width: parent.width
+            implicitHeight: pushBody.implicitHeight + Theme.s32
+            radius: Theme.rPanel
+            color: Theme.surface
+            border.width: 1
+            border.color: Theme.line
+
+            Column {
+                id: pushBody
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: Theme.s16
+                spacing: Theme.s10
+
+                Row {
+                    width: parent.width
+                    spacing: Theme.s16
+
+                    Column {
+                        width: parent.width - pushButton.width - Theme.s16
+                        spacing: Theme.s4
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.Wrap
+                            text: "Publish the approved results"
+                            font.family: Theme.sans
+                            font.pixelSize: Theme.body
+                            font.weight: Theme.semibold
+                            color: Theme.ink
+                        }
+
+                        Text {
+                            objectName: "pushExplain"
+                            width: parent.width
+                            wrapMode: Text.Wrap
+                            text: (screen.approvedCount === 0
+                                   ? "Approve the submissions to publish in the Review column first. "
+                                   : screen.approvedCount + (screen.approvedCount === 1 ? " approved submission" : " approved submissions")
+                                     + " will be published with the experiment and this form, signed by you. ")
+                                  + "Your node fetches and keeps every photo they name, so the storage is yours. "
+                                  + "It is public and permanent; pushing again publishes a newer version."
+                            font.family: Theme.sans
+                            font.pixelSize: Theme.small
+                            color: Theme.ink2
+                        }
+                    }
+
+                    Button {
+                        id: pushButton
+                        objectName: "pushButton"
+                        anchors.verticalCenter: parent.verticalCenter
+                        height: Theme.touchTarget
+                        leftPadding: Theme.s20
+                        rightPadding: Theme.s20
+                        enabled: screen.approvedCount > 0 && !screen.pushing && !screen.busy
+                        text: screen.pushing ? "Pushing\u2026" : "Push to Logos Storage"
+                        Accessible.name: "Push the approved results to Logos Storage"
+                        onClicked: screen.pushToStorage()
+                        contentItem: Text {
+                            text: pushButton.text
+                            font.family: Theme.sans
+                            font.pixelSize: Theme.small
+                            font.weight: Theme.medium
+                            color: pushButton.enabled ? Theme.textOnAccent : Theme.ink3
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                        background: Rectangle {
+                            radius: Theme.rControl
+                            color: !pushButton.enabled ? Theme.surfaceSunken
+                                 : (pushButton.down ? Theme.accentHover : Theme.accent)
+                        }
+                    }
+                }
+
+                Text {
+                    objectName: "pushOutcome"
+                    visible: text !== ""
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    textFormat: Text.PlainText
+                    text: {
+                        var r = screen.pushResult;
+                        if (r && r.ok === false)
+                            return "Not pushed: " + (r.error && r.error.message ? r.error.message : "something went wrong");
+                        if (r && r.ok) {
+                            var d = r.data;
+                            var media = d.media && d.media.named > 0
+                                        ? " Photos held: " + d.media.held + " of " + d.media.named
+                                          + (d.media.missing && d.media.missing.length > 0
+                                             ? " (the rest could not be fetched; push again later to retry)." : ".")
+                                        : "";
+                            return "Pushed " + d.rows + (d.rows === 1 ? " row" : " rows") + " to Logos Storage at "
+                                   + d.cid + "." + media
+                                   + (d.listed_in_manifest ? "" : " The experiment could not be updated to point at it yet.");
+                        }
+                        if (screen.published)
+                            return "Last published " + String(screen.published.published_at).slice(0, 16).replace("T", " ")
+                                   + " with " + screen.published.rows + " rows, at " + screen.published.cid + ".";
+                        return "";
+                    }
+                    font.family: Theme.sans
+                    font.pixelSize: Theme.small
+                    color: screen.pushResult && screen.pushResult.ok === false ? Theme.amber : Theme.accent
+                }
+            }
+        }
+
         // Received but not yet fetched is a real state on a network with no
         // listing, so it is stated rather than quietly folded into the count.
         Text {
@@ -180,6 +315,22 @@ Flickable {
                             anchors.left: parent.left
                             anchors.leftMargin: Theme.s12
                             text: "Submitter"
+                            font.family: Theme.sans
+                            font.pixelSize: Theme.meta
+                            font.weight: Theme.semibold
+                            color: Theme.ink2
+                        }
+                    }
+
+                    Rectangle {
+                        width: screen.reviewWidth
+                        height: Theme.touchTarget
+                        color: Theme.surfaceSunken
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.left: parent.left
+                            anchors.leftMargin: Theme.s12
+                            text: screen.rewarding ? "Review (for rewards)" : "Review"
                             font.family: Theme.sans
                             font.pixelSize: Theme.meta
                             font.weight: Theme.semibold
@@ -307,6 +458,76 @@ Flickable {
                                             color: hideButton.down ? Theme.surfaceSunken : "transparent"
                                             border.width: 1
                                             border.color: Theme.line
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Approve or reject this submission. Pressing the
+                        // chosen one again puts it back to pending. A paid
+                        // submission is settled and shows only that.
+                        Rectangle {
+                            id: review
+                            readonly property string cid: dataRow.modelData.cid ? dataRow.modelData.cid : ""
+                            readonly property string approval: dataRow.modelData.approval
+                                                               ? dataRow.modelData.approval : "pending"
+                            width: screen.reviewWidth
+                            height: Theme.touchTarget + Theme.s8
+                            color: dataRow.index % 2 === 0 ? Theme.surface : Theme.ground
+
+                            Text {
+                                visible: review.cid === "" || dataRow.modelData.paid === true
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.left: parent.left
+                                anchors.leftMargin: Theme.s12
+                                text: dataRow.modelData.paid === true ? "Rewarded \u2713" : "Not indexed yet"
+                                font.family: Theme.sans
+                                font.pixelSize: Theme.meta
+                                font.weight: dataRow.modelData.paid === true ? Theme.semibold : Theme.regular
+                                color: dataRow.modelData.paid === true ? Theme.accent : Theme.ink3
+                            }
+
+                            Row {
+                                visible: review.cid !== "" && dataRow.modelData.paid !== true
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.left: parent.left
+                                anchors.leftMargin: Theme.s12
+                                spacing: Theme.s6
+
+                                Repeater {
+                                    model: [
+                                        { status: "approved", label: "Approve", on: Theme.accent, tint: Theme.accentTint },
+                                        { status: "rejected", label: "Reject", on: Theme.amber, tint: Theme.amberTint }
+                                    ]
+
+                                    delegate: Button {
+                                        id: verdict
+                                        required property var modelData
+                                        readonly property bool chosen: review.approval === modelData.status
+                                        objectName: "review_" + modelData.status
+                                        height: Theme.chipHeight
+                                        leftPadding: Theme.s10
+                                        rightPadding: Theme.s10
+                                        enabled: !screen.busy
+                                        text: (chosen ? "\u2713 " : "") + modelData.label
+                                        Accessible.name: (chosen ? "Undo " : "") + modelData.label + " this submission"
+                                        onClicked: screen.setApproval(review.cid, chosen ? "pending" : modelData.status)
+                                        contentItem: Text {
+                                            text: verdict.text
+                                            font.family: Theme.sans
+                                            font.pixelSize: Theme.meta
+                                            font.weight: verdict.chosen ? Theme.semibold : Theme.regular
+                                            color: verdict.chosen ? verdict.modelData.on : Theme.ink2
+                                            verticalAlignment: Text.AlignVCenter
+                                        }
+                                        background: Rectangle {
+                                            radius: Theme.rPill
+                                            color: verdict.chosen ? verdict.modelData.tint
+                                                 : (verdict.down ? Theme.surfaceSunken : "transparent")
+                                            border.width: 1
+                                            border.color: verdict.chosen ? verdict.modelData.on
+                                                        : (verdict.activeFocus ? Theme.accent : Theme.line)
                                         }
                                     }
                                 }

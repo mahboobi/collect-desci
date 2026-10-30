@@ -31,6 +31,7 @@ pub enum Kind {
     Protocol,
     Submission,
     Index,
+    Results,
     HeadAnnouncement,
     SubmissionAnnouncement,
     ReceiptAnnouncement,
@@ -39,11 +40,12 @@ pub enum Kind {
 }
 
 impl Kind {
-    const ALL: [Kind; 9] = [
+    const ALL: [Kind; 10] = [
         Kind::Experiment,
         Kind::Protocol,
         Kind::Submission,
         Kind::Index,
+        Kind::Results,
         Kind::HeadAnnouncement,
         Kind::SubmissionAnnouncement,
         Kind::ReceiptAnnouncement,
@@ -62,6 +64,7 @@ impl Kind {
             Kind::Protocol => "collect/protocol@1",
             Kind::Submission => "collect/submission@1",
             Kind::Index => "collect/index@1",
+            Kind::Results => "collect/results@1",
             Kind::HeadAnnouncement => "announcement:head",
             Kind::SubmissionAnnouncement => "announcement:submission",
             Kind::ReceiptAnnouncement => "announcement:receipt",
@@ -109,6 +112,7 @@ fn branch_schema(kind: Kind) -> Value {
         Kind::Protocol => json!({ "$ref": "#/$defs/protocol" }),
         Kind::Submission => json!({ "$ref": "#/$defs/submission" }),
         Kind::Index => json!({ "$ref": "#/$defs/index" }),
+        Kind::Results => json!({ "$ref": "#/$defs/results" }),
         // `announcement` is itself a oneOf over the three kinds, which would
         // put us back to a root-anchored error. Split it: the shared members
         // (base, minus its oneOf) and the one matching branch, combined with
@@ -178,6 +182,7 @@ pub fn kind(doc: &Value) -> Result<Kind, Error> {
             "collect/protocol@1" => Ok(Kind::Protocol),
             "collect/submission@1" => Ok(Kind::Submission),
             "collect/index@1" => Ok(Kind::Index),
+            "collect/results@1" => Ok(Kind::Results),
             _ => Err(Error::Unidentified),
         };
     }
