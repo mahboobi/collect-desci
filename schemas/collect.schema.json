@@ -13,6 +13,7 @@
 
   "$defs": {
     "key": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Ed25519 public key, hex" },
+    "boxKey": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "X25519 public key for sealing profiles, hex. Bound to 'from' by the announcement's signature" },
     "sig": { "type": "string", "pattern": "^[0-9a-f]{128}$", "description": "Ed25519 signature, hex" },
     "cid": { "type": "string", "pattern": "^logos:[A-Za-z0-9]+$" },
     "ts": { "type": "string", "format": "date-time" },
@@ -88,6 +89,7 @@
           }
         },
         "index": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/cid" }], "description": "Latest index page when this manifest was written" },
+        "thumbnail": { "$ref": "#/$defs/media", "description": "Optional cover image: a 16:9 JPEG on Storage, metadata removed. Absent when there is none." },
         "prev": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/cid" }] },
         "created_at": { "$ref": "#/$defs/ts" },
         "sig": { "$ref": "#/$defs/sig" }
@@ -207,7 +209,7 @@
       "type": "object",
       "required": ["kind", "experiment", "from", "at", "sig"],
       "properties": {
-        "kind": { "enum": ["head", "submission", "receipt"] },
+        "kind": { "enum": ["head", "submission", "receipt", "message", "profile"] },
         "experiment": { "$ref": "#/$defs/experimentId" },
         "from": { "$ref": "#/$defs/key" },
         "at": { "$ref": "#/$defs/ts" },
@@ -216,7 +218,9 @@
       "oneOf": [
         { "properties": { "kind": { "const": "head" }, "experiment": true, "from": true, "at": true, "sig": true, "manifest": { "$ref": "#/$defs/cid" }, "manifest_version": { "type": "integer", "minimum": 1 }, "index": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/cid" }] }, "index_page": { "type": "integer", "minimum": 0 } }, "required": ["manifest", "manifest_version", "index", "index_page"], "additionalProperties": false },
         { "properties": { "kind": { "const": "submission" }, "experiment": true, "from": true, "at": true, "sig": true, "cid": { "$ref": "#/$defs/cid" }, "protocol": { "$ref": "#/$defs/protocolId" }, "version": { "type": "integer", "minimum": 1 } }, "required": ["cid", "protocol", "version"], "additionalProperties": false },
-        { "properties": { "kind": { "const": "receipt" }, "experiment": true, "from": true, "at": true, "sig": true, "cid": { "$ref": "#/$defs/cid" }, "index_page": { "type": "integer", "minimum": 1 } }, "required": ["cid", "index_page"], "additionalProperties": false }
+        { "properties": { "kind": { "const": "receipt" }, "experiment": true, "from": true, "at": true, "sig": true, "cid": { "$ref": "#/$defs/cid" }, "index_page": { "type": "integer", "minimum": 1 } }, "required": ["cid", "index_page"], "additionalProperties": false },
+        { "description": "A discussion message among a project's members. Delivery only, never written to Logos Storage, and readable by anyone on the topic.", "properties": { "kind": { "const": "message" }, "experiment": true, "from": true, "at": true, "sig": true, "id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", "description": "UUIDv7, unique per sender" }, "text": { "type": "string", "minLength": 1, "maxLength": 2000 }, "reply_to": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" }, "box": { "$ref": "#/$defs/boxKey" } }, "required": ["id", "text", "box"], "additionalProperties": false },
+        { "description": "A member's profile, sealed separately for each member it is shared with. An empty 'sealed' list introduces the member's box key and shares nothing.", "properties": { "kind": { "const": "profile" }, "experiment": true, "from": true, "at": true, "sig": true, "box": { "$ref": "#/$defs/boxKey" }, "sealed": { "type": "array", "maxItems": 32, "items": { "type": "object", "required": ["to", "nonce", "ct"], "additionalProperties": false, "properties": { "to": { "$ref": "#/$defs/key" }, "nonce": { "type": "string", "pattern": "^[0-9a-f]{24}$" }, "ct": { "type": "string", "maxLength": 24000, "pattern": "^[A-Za-z0-9+/]*={0,2}$" } } } } }, "required": ["box", "sealed"], "additionalProperties": false }
       ]
     }
   }

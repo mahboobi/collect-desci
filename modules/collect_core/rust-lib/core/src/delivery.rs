@@ -124,6 +124,13 @@ pub trait Courier: Send {
     /// Whether this node may publish.
     fn rln(&self) -> RlnStatus;
 
+    /// Delivery's own word for its connectivity — `Connected`,
+    /// `PartiallyConnected` or `Disconnected` (`getConnectionStatus`). `None`
+    /// when it could not be asked.
+    fn connection(&self) -> Option<String> {
+        None
+    }
+
     /// Messages that have arrived since the last call, and clear them.
     ///
     /// A queue the session drains rather than a callback into it. Delivery
@@ -272,6 +279,12 @@ impl Seen {
         self.order.len()
     }
 
+    /// Every remembered hash, oldest first, so the set can be saved and
+    /// replayed through `accept` on the next start.
+    pub fn hashes(&self) -> impl Iterator<Item = &String> {
+        self.order.iter()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.order.is_empty()
     }
@@ -287,6 +300,7 @@ pub struct MemoryCourier {
     arrived: std::sync::Mutex<Vec<Value>>,
     fail_with: Option<DeliveryError>,
     rln: RlnStatus,
+    connection: Option<String>,
 }
 
 impl Default for MemoryCourier {
@@ -303,7 +317,13 @@ impl MemoryCourier {
             arrived: std::sync::Mutex::new(Vec::new()),
             fail_with: None,
             rln: RlnStatus::not_required(),
+            connection: Some("Connected".into()),
         }
+    }
+
+    /// A courier that reports `status` from `getConnectionStatus`.
+    pub fn connected(status: Option<&str>) -> Self {
+        MemoryCourier { connection: status.map(str::to_string), ..MemoryCourier::new() }
     }
 
     pub fn failing(error: DeliveryError) -> Self {
@@ -401,6 +421,10 @@ impl Courier for MemoryCourier {
 
     fn rln(&self) -> RlnStatus {
         self.rln.clone()
+    }
+
+    fn connection(&self) -> Option<String> {
+        self.connection.clone()
     }
 
     fn inbox(&self) -> Vec<Value> {

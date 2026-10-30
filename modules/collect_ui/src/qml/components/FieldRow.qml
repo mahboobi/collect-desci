@@ -117,8 +117,12 @@ Column {
     }
 
     // ---- the complaint ----
+    //
+    // A problem shows at once: it only exists once something was entered, and
+    // it disables Submit, so waiting for a Submit press would hide the reason
+    // behind a button that cannot be pressed. "Required" waits for the press.
     Text {
-        visible: row.showProblems && (row.problem !== "" || row.missing)
+        visible: row.problem !== "" || (row.showProblems && row.missing)
         width: parent.width
         wrapMode: Text.Wrap
         text: row.problem !== "" ? row.problem : "This field is required"

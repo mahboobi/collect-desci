@@ -23,7 +23,7 @@ Everything is a JSON document on **Logos Storage**, addressed by CID. Documents 
 
 | Document (`schema`) | Author | Contents | Mutable? |
 | --- | --- | --- | --- |
-| `collect/experiment@1` | Creator | id, version, title, description, starts_at, ends_at, timezone, protocol list (id, version, CID, status), `prev` (previous manifest CID) | No. Each edit uploads a new version that points to the previous one. |
+| `collect/experiment@1` | Creator | id, version, title, description, starts_at, ends_at, timezone, protocol list (id, version, CID, status), `prev` (previous manifest CID), optional `thumbnail` (a `media` entry: 960x540 JPEG cover on Storage, metadata removed; added 30 October 2026) | No. Each edit uploads a new version that points to the previous one. |
 | `collect/protocol@1` | Creator | id, version, name, instructions, fields, options | No. Edits create a new version; submissions name the version they used. |
 | `collect/submission@1` | Submitter | experiment, protocol id and version, submitter key and optional name, submitted_at, values; media as CIDs | No |
 | `collect/index@1` | Creator | One page (up to 1,000 entries) listing received submissions, hidden keys, and `prev` page CID | No. New pages link back to earlier ones. |
@@ -122,13 +122,13 @@ methods beside it:
 | --- | --- |
 | Session | `session.capabilities` → `{signing, publishing, store, …}` |
 | Identity | `identity.me` → `{key, signing}` |
-| Experiments | `experiments.list`, `experiments.get {experimentId}`, `experiments.create {title, description, startsAt, endsAt, timezone, creatorName}`, `experiments.update {experimentId, …}`, `experiments.publish {experimentId}` (retry an upload), `experiments.open {link}`, `experiments.parseLink` |
+| Experiments | `experiments.list`, `experiments.get {experimentId}`, `experiments.create {title, description, startsAt, endsAt, timezone, creatorName}`, `experiments.update {experimentId, …}`, `experiments.publish {experimentId}` (retry an upload), `experiments.setThumbnail {experimentId, path}` (path or `file://` URL; needs Storage; makes a new version), `experiments.clearThumbnail {experimentId}`, `experiments.open {link}`, `experiments.parseLink`. `list` cards and `get` carry `thumbnail`: a data URI the UI can show, or null when there is none or this node does not hold it yet (the drain fetches missing ones, two per run, and checks each against the manifest's sha256) |
 | Protocols | `protocols.get`, `protocols.saveDraft`, `protocols.validateDraft` |
 | Submissions | `submissions.validate`, `submissions.prepareValues`, `submissions.processMedia` |
 | Index | `index.accept`, `index.page` |
 | Results | `results.list {experimentId, protocolId}`, `results.export {experimentId, protocolId, format, includeMedia}` → `{path, rows, bytes, media}` |
 | Moderation | `submitters.hide {experimentId, submitter}`, `submitters.show {…}` |
-| Delivery | `delivery.status`, `delivery.drain`, `delivery.publishHead {experimentId}`, `delivery.announceSubmission {experimentId, cid, protocolId, version}`, `delivery.deliver {topic, messageHash, payload, source}` |
+| Delivery | `delivery.status` (includes `connection: {level: online \| degraded \| offline, reason}` for the dashboard dot, from Delivery's `getConnectionStatus`, Storage presence and RLN readiness), `delivery.drain`, `delivery.publishHead {experimentId}`, `delivery.announceSubmission {experimentId, cid, protocolId, version}`, `delivery.deliver {topic, messageHash, payload, source}` |
 | Geo | `geo.round` |
 
 Differences worth naming:
@@ -215,7 +215,53 @@ The UI is a **form renderer** driven by the protocol JSON. The wildlife form in 
 
 ---
 
+## 10. Science profile and project discussion (added 29 October 2026)
+
+Two additions requested after the first live test. **Neither ever writes to Logos Storage.**
+
+### 10.1 Profile
+
+Opened from the **Profile** button at the top right of every screen. Fields, all optional: name or alias, affiliation, location (a city or region, not GPS), sex (female, male, intersex, other, prefer not to say), age (1 to 130), email, phone, wallet address (public address only), and a photo.
+
+- Kept in `profile.json` in the module's persistence directory, readable by the owner only. A file that cannot be read is reported and never overwritten.
+- Each field has its own **Share with project members** switch. Off by default.
+- The photo is passed through the same metadata removal as submission photos, cropped square, and kept as a 128 px JPEG. The shared copy is 64 px. The original file is never kept.
+- Validation checks shape only. This is self-description, not verification.
+
+### 10.2 Sharing a profile
+
+A shared field is sealed **separately for each member** and sent as a `profile` announcement on the experiment's Delivery topic (contract: `announcement` kind `profile`).
+
+- Each installation has an X25519 "box" key beside its Ed25519 signing key. The box key travels inside signed announcements, so the signature binds it to the member.
+- For each recipient: X25519, then HKDF-SHA256 with an `info` naming the purpose, both box keys and both identities, then ChaCha20-Poly1305 with a random nonce. The associated data is the experiment id plus both identities, so an entry cannot be moved to another experiment or re-addressed.
+- **Members** are the keys whose signed `message` or `profile` arrived on the topic. A node introduces itself with a `profile` announcement as soon as it can, with an empty `sealed` list if it shares nothing. It re-sends when its own shared fields change (at once) or a new member appears (at most once a minute). At most 32 recipients per announcement, the most recently seen first.
+- What stays visible to anyone on the topic: who shares with whom, when, and roughly how much.
+- A received profile is re-validated, unknown fields are dropped, and a photo must be a small JPEG data URI.
+
+### 10.3 Discussion
+
+Opened from **Discussion** on the experiment screen.
+
+- A `message` announcement (contract: kind `message`): UUIDv7 id, 1 to 2000 characters of plain text, the sender's box key, signed.
+- **Readable by anyone with the experiment's link.** The screen says so. Names and photos appear only for members who shared them with this node.
+- Kept per experiment in `messages/<experimentId>.jsonl`, at most 2000 per experiment, sorted by the sender's timestamp, and deduplicated by sender and id (Store catch-up re-delivers under new message hashes). A message is kept only once Delivery accepted it.
+- Sending needs RLN, like every announcement (Q9).
+
+### 10.4 API
+
+`profile.get`, `profile.save`, `profile.setPhoto` (`{ path, share }`, read by `collect_core` because the UI sandbox cannot read files), `profile.clearPhoto`, `messages.list`, `messages.send` (`{ experimentId, text, replyTo? }`), `members.list`. `delivery.drain` also sends due profile announcements and reports them as `profiles_shared`.
+
+---
+
 ## 9. Open questions
+
+Raised by the profile and discussion work, 29 October 2026:
+
+| # | Question | State |
+| --- | --- | --- |
+| Q15 | Does the Basecamp UI sandbox allow `QtQuick.Dialogs`? | **Open — check in the app.** The photo picker loads through a `Loader`. If the import is refused, the profile screen falls back to a typed file path. **Answered 30 October 2026 (Basecamp 0.3.2):** the QtQuick FileDialog does open, but it is parented to the view's offscreen window, so the person is left outside Basecamp. On macOS the backend now runs the chooser as `osascript` and reactivates Basecamp (`pickImage` / `imagePicked`). The sandbox also refuses `data:` image URLs, so the backend writes every image in a reply into `plugins/collect_ui/cache/` and passes a `file://` URL. |
+| Q16 | What RLN rate limit applies to messages on `logos.test`? | **Open.** Every message and profile announcement uses the sender's RLN quota. If the quota is one message per 600 s epoch, discussion is unusable on testnet. |
+| Q17 | Projects with more than 32 members | **Open.** Only the 32 most recently seen members get a sealed profile. A larger project would need several announcements, or a group key. |
 
 Two raised by wiring Storage and Delivery, 29 October 2026:
 
@@ -236,7 +282,7 @@ Answered 28 October 2026 against the published APIs and `lgs basecamp docs`. Evi
 | Q5 | Map tiles in QML (network from a core module? offline tiles?) | **Unchanged.** Nothing lifts the UI sandbox. Placeholder map plus typed coordinates; photo GPS works without a map. |
 | Q6 | Optional always-on **mirror** node (headless `collect_core` that pins and re-publishes the index when the creator is offline) | Not in v1; recommend for any experiment that runs for weeks. Q8 makes this more attractive, since a mirror would also hold durable state. |
 | Q7 | More than one creator per experiment | Not in v1. |
-| Q8 | **New, now mostly answered.** Where does `collect_core` keep state that must survive a relaunch? | `RustModuleContext::instance_persistence_path` — "a writable, per-instance directory, the place to keep a module's on-disk state", read via `context()` from `on_context_ready`. The scrub in `lgs basecamp docs` is `lgs basecamp launch`'s deliberate clean-slate contract, not Basecamp's, so in normal use this persists. What remains is a **testing** problem: §8 test 3 restarts the creator, so hand-launch with `--user-dir` outside the scaffold profile tree. |
+| Q8 | **New, now mostly answered.** Where does `collect_core` keep state that must survive a relaunch? | `RustModuleContext::instance_persistence_path` — "a writable, per-instance directory, the place to keep a module's on-disk state", read via `context()` from `on_context_ready`. The scrub in `lgs basecamp docs` is `lgs basecamp launch`'s deliberate clean-slate contract, not Basecamp's, so in normal use this persists. What remains is a **testing** problem: §8 test 3 restarts the creator, so hand-launch with `--user-dir` outside the scaffold profile tree. Until 30 October 2026 the code never wrote there, so every relaunch emptied the dashboard; experiments, forms, submissions, index pages, published CIDs, receipts, heads and seen message hashes are now saved to `state.json` in that directory after every call and re-validated on load. |
 | Q9 | **Answered: no.** Does a Basecamp 0.3.0 profile come with a usable RLN membership? | **No.** With every module in place — `liblogos_rln_module` and `liblogos_lez_rln_module`, neither shipped with basecamp — RLN reaches `rln Ready` and the lez wallet initialises. Delivery then says: `No usable RLN membership; proof validation is unaffected, sends fail until it is active (status=Unknown)`. The wallet also reports `initial sync incomplete: sync to 68999 failed (code 13)`. So announcements cannot go out from a stock profile, and acquiring a membership needs testnet funds, which `CLAUDE.md` rules out for v1. Everything up to the send works regardless: a submission is signed and on Storage with a real CID before it is announced, and the creator's side indexes from Storage. **Caution:** `rlnState()` reporting `Ready` describes the subsystem, not the membership — a send gated only on that state would be attempted and fail asynchronously via `messageError`, which Collect does not currently watch. Closing that is the next Delivery task. |
 | Q10 | Spam: is the per-key rate limit enough, given that anyone can make new keys? | Rate limit plus hide; revisit if abused. (Was Q8.) RLN, if it does apply to submitters, is itself a per-identity rate limit and partly answers this. |
 | Q12 | **Decided: stay with `ui-qml-backend`.** | The pass-through turned out to be one `SLOT` — `call(method, request)` — not one per method, so the layer it would delete is about ten lines. Against deleting it: the auto-syncing `PROP`s (`capabilities`, `coreReady`, `documents`) are what make the dashboard populate without a call, and that is also what masked the QtRO async bug for a while. Keeping the pin. |

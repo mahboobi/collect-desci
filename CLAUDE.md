@@ -4,7 +4,9 @@ Standing instructions for every Claude Code session in this repository. The prod
 
 ## What we are building
 
-A small Basecamp app. A creator defines an experiment with dates and one or more data collection forms (protocols). Submitters with Basecamp open the link and fill in a form. Every document is signed and stored publicly on Logos Storage; Logos Delivery carries announcements. No blockchain, no tokens, no encryption of content in v1.
+A small Basecamp app. A creator defines an experiment with dates and one or more data collection forms (protocols). Submitters with Basecamp open the link and fill in a form. Every document is signed and stored publicly on Logos Storage; Logos Delivery carries announcements. No blockchain, no tokens or payments in v1.
+
+Each person also has a **science profile** (top right) and each project has a **discussion** (SPEC section 10). Neither is ever written to Logos Storage: the profile stays on the device, shared profile fields are sealed per recipient (X25519 + ChaCha20-Poly1305, `core/src/seal.rs`) and travel on the experiment's Delivery topic, and messages travel on the same topic and are kept in a local history. Documents themselves stay unencrypted.
 
 ## Pinned stack (do not upgrade without asking)
 
@@ -16,6 +18,8 @@ A small Basecamp app. A creator defines an experiment with dates and one or more
 | Nix | flakes enabled |
 
 Development: Linux or macOS. First `lgs basecamp setup` needs about 5 GB free memory.
+
+**Testing happens in the installed `/Applications/LogosBasecamp.app`** (0.3.2 on testnet, as of 29 October 2026), not in scaffold profiles. Build `nix build .#lgx-portable` in each module and install with a *portable* `lgpm` (the scaffold's is a `-dev` build and refuses portable packages). Never run a scaffold Basecamp at the same time: every Storage instance shares `~/.logos_storage/data`, and the second one fails with "Should create metadata store!". The modules are still built with logos-module-builder 0.3.0, and the app accepts them.
 
 ## Layout
 
@@ -42,6 +46,11 @@ is not copied. See `docs/api-verification.md` round 3.
 ## Platform constraints
 
 1. QML UI modules are sandboxed: no network, no files outside the module. All Storage, Delivery, file and crypto work happens in `collect_core`; the UI calls it with `logos.callModule`.
+1a. The sandbox also refuses `data:` URLs (images included) and parents any
+   QtQuick dialog to an offscreen window. Images reach the view as `file://`
+   URLs into `plugins/collect_ui/cache/`, written by the C++ backend
+   (`collect_ui_backend.cpp`); file choosing goes through the backend's
+   `pickImage`. Never hand the view a `data:` URL directly.
 1b. Storage and Delivery must be **declared** in `metadata.json` *and* given
    flake inputs with `follows` unification. Installing a module does not load
    it — the declaration is what makes the host load it, and without one every
@@ -110,6 +119,8 @@ is not copied. See `docs/api-verification.md` round 3.
   - Delivery: https://logos-co.github.io/logos-delivery-module/latest/pages/api_reference.html
   - Core modules: https://docs.logos.co/core/build-modules/build-and-run-a-logos-core-module
   - Scaffold: https://docs.logos.co/build-an-app/scaffold/about-logos-scaffold
-- Do not add encryption, a blockchain, tokens or payments in v1.
-- Do not collect or display personal data beyond the optional display name a submitter chooses.
+- Do not add a blockchain, tokens or payments in v1. A wallet *address* in the profile is self-description, not a payment feature.
+- Encryption is for sealed profile fields only (`seal.rs`). Do not add another scheme, and do not encrypt documents.
+- Personal data lives only in the profile. It never goes into a document, never onto Logos Storage, and never onto Delivery in the clear: each field leaves the device only when its own `share` switch is on, sealed for each member separately. Submissions still carry only the optional public display name.
+- Do not put anything in a `message` that is not the person's own typed text: messages are readable by anyone with the experiment's link.
 - Do not change pins or the document formats without asking.

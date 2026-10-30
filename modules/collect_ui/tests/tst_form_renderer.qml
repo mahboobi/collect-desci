@@ -298,5 +298,56 @@ Item {
             compare(r.missingLabels, []);
             r.destroy();
         }
+
+        function test_a_bad_optional_field_says_why_submit_is_blocked() {
+            // The reported bug: an out-of-range position in an optional field
+            // disabled Submit while missingLabels was empty, so the form said
+            // only "Fill in the form to submit."
+            var r = make(host.everyType);
+            r.rowAt(0).delegateItem.value = "hello";
+            r.rowAt(2).delegateItem.value = 3;
+            r.rowAt(3).delegateItem.picked = "birds";
+            r.rowAt(8).delegateItem.value = false;
+            var where = r.rowAt(7).delegateItem;
+            where.lat = 2232.223;
+            where.lon = 2322.334;
+            where.method = "manual";
+            verify(!r.complete, "an out-of-range location did not block Submit");
+            compare(r.missingLabels, []);
+            compare(r.problemLabels, ["Where: latitude is out of range"]);
+            r.destroy();
+        }
+
+        function test_a_problem_shows_before_any_submit_press() {
+            // Submit is disabled while the problem stands, so a complaint that
+            // waited for a press would never appear.
+            var r = make(host.everyType);
+            var row = r.rowAt(7);
+            row.delegateItem.lat = 95;
+            row.delegateItem.lon = 10;
+            row.delegateItem.method = "manual";
+            compare(r.showProblems, false);
+            var shown = false;
+            for (var i = 0; i < row.children.length; i++) {
+                var c = row.children[i];
+                if (c.text === "Latitude is out of range" && c.visible)
+                    shown = true;
+            }
+            verify(shown, "the latitude problem was hidden until Submit");
+            r.destroy();
+        }
+
+        function test_clearing_a_coordinate_forgets_it() {
+            var r = make(host.everyType);
+            var where = r.rowAt(7).delegateItem;
+            var lat = findChild(where, "lat");
+            lat.text = "12.5";
+            lat.textEdited();
+            compare(where.lat, 12.5);
+            lat.text = "";
+            lat.textEdited();
+            compare(where.lat, undefined);
+            r.destroy();
+        }
     }
 }

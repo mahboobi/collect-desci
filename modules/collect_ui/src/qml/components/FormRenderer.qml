@@ -33,6 +33,19 @@ Column {
         return out;
     }
 
+    // Every field that is filled in but wrong, as "Label: problem". Optional
+    // fields land here too, which is the point: an optional field filled in
+    // badly still blocks Submit, and missingLabels alone would not say why.
+    readonly property var problemLabels: {
+        var out = [];
+        for (var i = 0; i < rows.count; i++) {
+            var r = renderer.rowAt(i);
+            if (r && r.problem !== "")
+                out.push(r.field.label + ": " + r.problem.charAt(0).toLowerCase() + r.problem.slice(1));
+        }
+        return out;
+    }
+
     readonly property bool complete: {
         for (var i = 0; i < rows.count; i++) {
             var r = renderer.rowAt(i);

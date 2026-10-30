@@ -13,7 +13,9 @@ v = Draft202012Validator(schema, format_checker=FormatChecker())
 def load(name):
     return json.loads((root / "examples" / name).read_text())
 
-docs = [load("experiment.json"), load("protocol.json"), load("submission.json"), load("index.json")] + load("announcements.json")
+THUMB = {"cid": "logos:zDvZThumb", "sha256": "ab" * 32, "mime": "image/jpeg", "bytes": 48213, "width": 960, "height": 540}
+
+docs = [load("experiment.json"), dict(load("experiment.json"), thumbnail=THUMB), load("protocol.json"), load("submission.json"), load("index.json")] + load("announcements.json")
 fail = 0
 for d in docs:
     label = d.get("schema") or ("announcement:" + d.get("kind", "?"))
@@ -39,6 +41,16 @@ neg = [
     ("index page over 1000 entries", mutate(load("index.json"), lambda d: d.__setitem__("entries", d["entries"] * 501))),
     ("receipt missing cid", mutate(load("announcements.json")[2], lambda d: d.pop("cid"))),
     ("head with extra field", mutate(load("announcements.json")[0], lambda d: d.__setitem__("cid", "logos:x"))),
+    ("message without box key", mutate(load("announcements.json")[3], lambda d: d.pop("box"))),
+    ("empty message", mutate(load("announcements.json")[3], lambda d: d.__setitem__("text", ""))),
+    ("message over 2000 characters", mutate(load("announcements.json")[3], lambda d: d.__setitem__("text", "x" * 2001))),
+    ("message pointing at a Storage CID", mutate(load("announcements.json")[3], lambda d: d.__setitem__("cid", "logos:x"))),
+    ("profile carrying a field in the clear", mutate(load("announcements.json")[4], lambda d: d.__setitem__("email", "a@b.org"))),
+    ("profile sealed for 33 members", mutate(load("announcements.json")[4], lambda d: d.__setitem__("sealed", d["sealed"] * 33))),
+    ("thumbnail without a sha256", mutate(load("experiment.json"), lambda d: d.__setitem__("thumbnail", {k: v for k, v in THUMB.items() if k != "sha256"}))),
+    ("thumbnail as a bare URL", mutate(load("experiment.json"), lambda d: d.__setitem__("thumbnail", "https://example.org/a.jpg"))),
+    ("thumbnail as a GIF", mutate(load("experiment.json"), lambda d: d.__setitem__("thumbnail", dict(THUMB, mime="image/gif")))),
+    ("sealed entry with a short nonce", mutate(load("announcements.json")[4], lambda d: d["sealed"][0].__setitem__("nonce", "00"))),
 ]
 for label, d in neg:
     if v.is_valid(d):

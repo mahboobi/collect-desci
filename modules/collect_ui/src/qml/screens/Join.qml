@@ -1,7 +1,8 @@
 // S1 — the experiment as a submitter sees it after opening a link.
 //
 // Everything a reader needs to decide whether to trust and take part: who made
-// it, the key fingerprint, the dates, the public-data warning, and the forms.
+// it, the key fingerprint, the dates, the public-data warning, and the forms,
+// which are listed straight away.
 pragma ComponentBehavior: Bound
 
 import QtQuick
@@ -26,12 +27,8 @@ Flickable {
     signal openResults(string protocolId)
     signal addProtocol()
     signal editExperiment()
+    signal openDiscussion()
     signal back()
-
-    // The forms are behind an explicit step. Someone opening a link is
-    // reading first, and the public-data notice above is the thing they need
-    // to have seen before a form appears.
-    property bool contributing: false
 
     // A creator looking at their own experiment is editing, not contributing.
     property bool mine: false
@@ -44,6 +41,17 @@ Flickable {
     property string cid: ""
     property var publishError: null
     signal publishNow()
+
+    /// The cover image as a data URI from collect_core, or "" for none.
+    property string thumbnail: ""
+    /// A thumbnail upload in flight, and the last one's failure if any.
+    property bool thumbnailBusy: false
+    property string thumbnailError: ""
+    signal pickThumbnail(string url)
+    signal clearThumbnail()
+    /// Ask the backend's native chooser for a cover (see Profile.nativePicker).
+    signal requestThumbnailPick()
+    property bool nativePicker: false
 
     contentWidth: width
     contentHeight: body.implicitHeight + Theme.s48 * 2
@@ -78,12 +86,148 @@ Flickable {
             }
         }
 
+        // The cover. A submitter only sees it when there is one; the creator
+        // always does, with the controls to set it.
+        Column {
+            id: cover
+            visible: screen.thumbnail !== "" || screen.mine
+            width: parent.width
+            spacing: Theme.s8
+
+            Thumbnail {
+                objectName: "coverImage"
+                width: parent.width
+                source: screen.thumbnail
+                title: screen.experiment ? screen.experiment.title : ""
+                emptyNote: screen.mine ? "No cover image yet" : ""
+                opacity: screen.thumbnailBusy ? 0.5 : 1
+            }
+
+            Row {
+                visible: screen.mine
+                spacing: Theme.s8
+
+                Button {
+                    id: chooseCover
+                    objectName: "chooseCover"
+                    height: Theme.chipHeight
+                    leftPadding: Theme.s14
+                    rightPadding: Theme.s14
+                    enabled: !screen.thumbnailBusy
+                    text: screen.thumbnailBusy ? "Uploading\u2026"
+                          : (screen.thumbnail !== "" ? "Change cover image" : "Add cover image")
+                    Accessible.name: text
+                    onClicked: {
+                        if (screen.nativePicker)
+                            screen.requestThumbnailPick();
+                        else if (coverPicker.item)
+                            coverPicker.item.open();
+                        else
+                            coverPath.visible = true;
+                    }
+                    contentItem: Text {
+                        text: chooseCover.text
+                        font.family: Theme.sans
+                        font.pixelSize: Theme.small
+                        font.weight: Theme.medium
+                        color: Theme.accent
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        radius: Theme.rPill
+                        color: chooseCover.down ? Theme.surfaceSunken : Theme.surface
+                        border.width: 1
+                        border.color: chooseCover.activeFocus ? Theme.accent : Theme.line
+                    }
+                }
+
+                Button {
+                    id: removeCover
+                    objectName: "removeCover"
+                    visible: screen.thumbnail !== ""
+                    height: Theme.chipHeight
+                    leftPadding: Theme.s14
+                    rightPadding: Theme.s14
+                    enabled: !screen.thumbnailBusy
+                    text: "Remove"
+                    Accessible.name: "Remove the cover image"
+                    onClicked: screen.clearThumbnail()
+                    contentItem: Text {
+                        text: removeCover.text
+                        font.family: Theme.sans
+                        font.pixelSize: Theme.small
+                        color: Theme.ink2
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        radius: Theme.rPill
+                        color: removeCover.down ? Theme.surfaceSunken : "transparent"
+                        border.width: 1
+                        border.color: removeCover.activeFocus ? Theme.accent : Theme.line
+                    }
+                }
+            }
+
+            Text {
+                visible: screen.mine
+                width: parent.width
+                wrapMode: Text.Wrap
+                text: "Shown on the card and here to everyone with the link. It is cropped to 16:9, "
+                      + "location and camera details are removed, and it is stored publicly on Logos Storage."
+                font.family: Theme.sans
+                font.pixelSize: Theme.meta
+                color: Theme.ink3
+            }
+
+            // Shown when the sandbox has no file dialog.
+            Row {
+                id: coverPath
+                visible: false
+                spacing: Theme.s8
+
+                LabelledInput {
+                    id: coverPathInput
+                    width: Math.min(420, cover.width - coverUse.width - Theme.s8)
+                    label: "Path to an image file"
+                    mono: true
+                    hint: "This app cannot open a file picker here, so paste the file's full path."
+                }
+
+                Button {
+                    id: coverUse
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: coverPathInput.hint !== "" ? Theme.s24 : 0
+                    height: Theme.touchTarget
+                    text: "Use"
+                    Accessible.name: "Use this image as the cover"
+                    onClicked: screen.pickThumbnail(coverPathInput.text)
+                    background: Rectangle {
+                        radius: Theme.rControl
+                        color: Theme.surface
+                        border.width: 1
+                        border.color: Theme.inputBorder
+                    }
+                }
+            }
+
+            Text {
+                visible: screen.thumbnailError !== ""
+                width: parent.width
+                wrapMode: Text.Wrap
+                text: screen.thumbnailError
+                font.family: Theme.sans
+                font.pixelSize: Theme.small
+                color: Theme.amber
+            }
+        }
+
         Row {
             width: parent.width
             spacing: Theme.s12
 
             Text {
-                width: parent.width - (editDetails.visible ? editDetails.width + Theme.s12 : 0)
+                width: parent.width - discussButton.width - Theme.s12
+                       - (editDetails.visible ? editDetails.width + Theme.s12 : 0)
                 wrapMode: Text.Wrap
                 text: screen.experiment ? screen.experiment.title : ""
                 font.family: Theme.sans
@@ -91,6 +235,31 @@ Flickable {
                 font.weight: Theme.semibold
                 font.letterSpacing: Theme.titleSpacing
                 color: Theme.ink
+            }
+
+            Button {
+                id: discussButton
+                anchors.top: parent.top
+                height: Theme.chipHeight
+                leftPadding: Theme.s14
+                rightPadding: Theme.s14
+                text: "Discussion"
+                Accessible.name: "Open this project's discussion"
+                onClicked: screen.openDiscussion()
+                contentItem: Text {
+                    text: discussButton.text
+                    font.family: Theme.sans
+                    font.pixelSize: Theme.small
+                    font.weight: Theme.medium
+                    color: Theme.accent
+                    verticalAlignment: Text.AlignVCenter
+                }
+                background: Rectangle {
+                    radius: Theme.rPill
+                    color: discussButton.down ? Theme.surfaceSunken : "transparent"
+                    border.width: 1
+                    border.color: Theme.line
+                }
             }
 
             Button {
@@ -232,55 +401,11 @@ Flickable {
 
         PublicNotice {}
 
-        // ---- the gate ----
-        Column {
-            visible: !screen.contributing
-            width: parent.width
-            spacing: Theme.s12
-
-            Button {
-                id: contributeButton
-                height: Theme.touchTarget
-                leftPadding: Theme.s28
-                rightPadding: Theme.s28
-                enabled: screen.mine || (screen.open && Core.protocolsOf(screen.experiment).length > 0)
-                text: screen.mine ? "Open the forms" : "I would like to contribute to this experiment"
-                Accessible.name: contributeButton.text
-                onClicked: screen.contributing = true
-
-                contentItem: Text {
-                    text: contributeButton.text
-                    font.family: Theme.sans
-                    font.pixelSize: Theme.body
-                    font.weight: Theme.medium
-                    color: contributeButton.enabled ? Theme.textOnAccent : Theme.ink3
-                    verticalAlignment: Text.AlignVCenter
-                }
-                background: Rectangle {
-                    radius: Theme.rControl
-                    color: !contributeButton.enabled ? Theme.surfaceSunken
-                         : (contributeButton.down ? Theme.accentHover : Theme.accent)
-                }
-            }
-
-            Text {
-                width: parent.width
-                wrapMode: Text.Wrap
-                text: !screen.open
-                      ? "This experiment is not accepting submissions right now."
-                      : (Core.protocolsOf(screen.experiment).length === 0
-                         ? "This experiment has no forms yet."
-                         : (screen.mine ? "" : "You will see the forms after this, and nothing is submitted until you press Submit."))
-                visible: text !== ""
-                font.family: Theme.sans
-                font.pixelSize: Theme.small
-                color: screen.open ? Theme.ink3 : Theme.amber
-            }
-        }
-
         // ---- the forms ----
+        // Shown straight away, below the public-data notice. There used to be
+        // a "contribute" step in front of them; it only added a click.
         Column {
-            visible: screen.contributing
+            objectName: "formsSection"
             width: parent.width
             spacing: Theme.s12
 
@@ -322,6 +447,18 @@ Flickable {
                         border.color: Theme.accent
                     }
                 }
+            }
+
+            Text {
+                width: parent.width
+                wrapMode: Text.Wrap
+                text: Core.protocolsOf(screen.experiment).length === 0
+                      ? "This experiment has no forms yet."
+                      : (!screen.open ? "This experiment is not accepting submissions right now." : "")
+                visible: text !== ""
+                font.family: Theme.sans
+                font.pixelSize: Theme.small
+                color: screen.open ? Theme.ink3 : Theme.amber
             }
 
             Repeater {
@@ -467,5 +604,22 @@ Flickable {
                 }
             }
         }
+    }
+
+    Loader {
+        id: coverPicker
+        active: screen.mine && !screen.nativePicker
+        source: "../components/PhotoPicker.qml"
+        onLoaded: item.title = "Choose a cover image"
+        onStatusChanged: {
+            if (status === Loader.Error)
+                console.warn("collect: no file dialog in this sandbox; offering a typed path");
+        }
+    }
+
+    Connections {
+        target: coverPicker.item
+        ignoreUnknownSignals: true
+        function onPicked(url) { screen.pickThumbnail(url); }
     }
 }

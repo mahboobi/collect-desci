@@ -323,6 +323,51 @@ pub fn process(original: &[u8], max_mb_each: f64) -> Result<Cleaned, Error> {
     Ok(cleaned)
 }
 
+/// An experiment's thumbnail: 16:9, the shape of the dashboard card and the
+/// banner on the detail page.
+pub const THUMB_WIDTH: u32 = 960;
+pub const THUMB_HEIGHT: u32 = 540;
+const THUMB_QUALITY: u8 = 82;
+
+/// Make an experiment thumbnail from a photo: cleaned exactly as a submission
+/// photo is, then centre-cropped to 16:9 and re-encoded as a JPEG of
+/// `THUMB_WIDTH` x `THUMB_HEIGHT`.
+///
+/// The re-encode means nothing of the original's container survives; the
+/// self-check confirms it. What was read from the original is not carried:
+/// a thumbnail prefills nothing.
+pub fn thumbnail(original: &[u8]) -> Result<Cleaned, Error> {
+    let cleaned = process(original, 25.0)?;
+    let img = image::load_from_memory(&cleaned.bytes).map_err(|e| Error::Decode(e.to_string()))?;
+    let (w, h) = (img.width(), img.height());
+    // The largest 16:9 rectangle that fits, centred.
+    let (cw, ch) = if (w as u64) * (THUMB_HEIGHT as u64) > (h as u64) * (THUMB_WIDTH as u64) {
+        ((h as u64 * THUMB_WIDTH as u64 / THUMB_HEIGHT as u64) as u32, h)
+    } else {
+        (w, (w as u64 * THUMB_HEIGHT as u64 / THUMB_WIDTH as u64) as u32)
+    };
+    let cropped = img.crop_imm((w - cw) / 2, (h - ch) / 2, cw.max(1), ch.max(1));
+    let small = cropped
+        .resize_exact(THUMB_WIDTH, THUMB_HEIGHT, image::imageops::FilterType::Triangle)
+        .to_rgb8();
+    let mut bytes = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut Cursor::new(&mut bytes), THUMB_QUALITY)
+        .encode_image(&small)
+        .map_err(|e| Error::Encode(e.to_string()))?;
+    if let Some(found) = remaining_metadata(&bytes) {
+        return Err(Error::NotClean(found));
+    }
+    Ok(Cleaned {
+        sha256: hex::encode(Sha256::digest(&bytes)),
+        bytes,
+        mime: "image/jpeg",
+        width: THUMB_WIDTH,
+        height: THUMB_HEIGHT,
+        exif: PhotoExif::default(),
+        reencoded: true,
+    })
+}
+
 /// What metadata, if any, a finished file still carries.
 ///
 /// `None` means clean. Used by `process` on its own output and available to
@@ -755,6 +800,26 @@ mod tests {
     use image::{DynamicImage, RgbImage};
 
     use super::tests_support::*;
+
+    // ---- experiment thumbnails ----
+
+    #[test]
+    fn a_thumbnail_is_a_clean_16_by_9_jpeg_whatever_the_source_shape() {
+        for (w, h) in [(1200, 400), (300, 900), (640, 360), (50, 50)] {
+            let thumb = thumbnail(&with_exif(&plain_jpeg(w, h), &{ let (lat, lon) = bengaluru_dms(); exif_block(6, lat, lon) })).unwrap();
+            assert_eq!((thumb.width, thumb.height), (THUMB_WIDTH, THUMB_HEIGHT), "{w}x{h}");
+            assert_eq!(dimensions(&thumb.bytes).unwrap(), (THUMB_WIDTH, THUMB_HEIGHT));
+            assert_eq!(thumb.mime, "image/jpeg");
+            assert_eq!(remaining_metadata(&thumb.bytes), None, "{w}x{h} kept metadata");
+            assert_eq!(thumb.sha256, hex::encode(Sha256::digest(&thumb.bytes)));
+            assert_eq!(thumb.exif, PhotoExif::default(), "a thumbnail carried GPS forward");
+        }
+    }
+
+    #[test]
+    fn a_thumbnail_refuses_what_is_not_an_image() {
+        assert!(thumbnail(b"not an image").is_err());
+    }
 
     // ---- the fixture itself has to be real ----
 

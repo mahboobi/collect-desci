@@ -146,9 +146,12 @@ Flickable {
                 wrapMode: Text.Wrap
                 text: renderer.complete
                       ? "Ready to submit."
-                      : (renderer.missingLabels.length === 0
-                         ? "Fill in the form to submit."
-                         : "Still needed: " + renderer.missingLabels.join(", "))
+                      : [renderer.problemLabels.length > 0
+                             ? "To fix: " + renderer.problemLabels.join("; ") : "",
+                         renderer.missingLabels.length > 0
+                             ? "Still needed: " + renderer.missingLabels.join(", ") : ""]
+                        .filter(function (s) { return s !== ""; }).join(". ")
+                        || "Fill in the form to submit."
                 font.family: Theme.sans
                 font.pixelSize: Theme.small
                 color: renderer.complete ? Theme.accent : Theme.ink2

@@ -378,6 +378,14 @@ impl Courier for LogosDelivery {
         }
     }
 
+    fn connection(&self) -> Option<String> {
+        let answer = self
+            .proxy
+            .call_json("getConnectionStatus", &Value::Array(vec![]))
+            .ok()?;
+        result_text(&answer).ok()
+    }
+
     fn inbox(&self) -> Vec<Value> {
         let (lock, _) = &*self.inbox;
         lock.lock()

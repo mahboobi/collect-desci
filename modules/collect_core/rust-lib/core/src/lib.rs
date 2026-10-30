@@ -21,8 +21,11 @@ pub mod identity;
 pub mod ids;
 pub mod indexer;
 pub mod media;
+pub mod profile;
 pub mod schema;
+pub mod seal;
 pub mod session;
 pub mod sign;
+pub mod social;
 pub mod store;
 

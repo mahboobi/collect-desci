@@ -34,6 +34,13 @@ Rectangle {
         anchors.margins: Theme.s16
         spacing: Theme.s10
 
+        Thumbnail {
+            objectName: "cardThumbnail"
+            width: content.width
+            source: card.model.thumbnail ? card.model.thumbnail : ""
+            title: card.model.title ? card.model.title : ""
+        }
+
         Row {
             width: parent.width
             spacing: Theme.s8

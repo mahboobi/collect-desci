@@ -34,10 +34,12 @@ pub enum Kind {
     HeadAnnouncement,
     SubmissionAnnouncement,
     ReceiptAnnouncement,
+    MessageAnnouncement,
+    ProfileAnnouncement,
 }
 
 impl Kind {
-    const ALL: [Kind; 7] = [
+    const ALL: [Kind; 9] = [
         Kind::Experiment,
         Kind::Protocol,
         Kind::Submission,
@@ -45,6 +47,8 @@ impl Kind {
         Kind::HeadAnnouncement,
         Kind::SubmissionAnnouncement,
         Kind::ReceiptAnnouncement,
+        Kind::MessageAnnouncement,
+        Kind::ProfileAnnouncement,
     ];
 
     fn slot(self) -> usize {
@@ -61,6 +65,8 @@ impl Kind {
             Kind::HeadAnnouncement => "announcement:head",
             Kind::SubmissionAnnouncement => "announcement:submission",
             Kind::ReceiptAnnouncement => "announcement:receipt",
+            Kind::MessageAnnouncement => "announcement:message",
+            Kind::ProfileAnnouncement => "announcement:profile",
         }
     }
 }
@@ -108,7 +114,11 @@ fn branch_schema(kind: Kind) -> Value {
         // (base, minus its oneOf) and the one matching branch, combined with
         // allOf. The branch carries its own required list and
         // additionalProperties, so nothing is lost.
-        Kind::HeadAnnouncement | Kind::SubmissionAnnouncement | Kind::ReceiptAnnouncement => {
+        Kind::HeadAnnouncement
+        | Kind::SubmissionAnnouncement
+        | Kind::ReceiptAnnouncement
+        | Kind::MessageAnnouncement
+        | Kind::ProfileAnnouncement => {
             let ann = &defs["announcement"];
             let mut base = ann.clone();
             base.as_object_mut()
@@ -117,6 +127,8 @@ fn branch_schema(kind: Kind) -> Value {
             let which = match kind {
                 Kind::HeadAnnouncement => "head",
                 Kind::SubmissionAnnouncement => "submission",
+                Kind::MessageAnnouncement => "message",
+                Kind::ProfileAnnouncement => "profile",
                 _ => "receipt",
             };
             let branch = ann["oneOf"]
@@ -173,6 +185,8 @@ pub fn kind(doc: &Value) -> Result<Kind, Error> {
         Some("head") => Ok(Kind::HeadAnnouncement),
         Some("submission") => Ok(Kind::SubmissionAnnouncement),
         Some("receipt") => Ok(Kind::ReceiptAnnouncement),
+        Some("message") => Ok(Kind::MessageAnnouncement),
+        Some("profile") => Ok(Kind::ProfileAnnouncement),
         _ => Err(Error::Unidentified),
     }
 }
@@ -346,7 +360,7 @@ mod tests {
     #[test]
     fn every_example_announcement_validates() {
         let anns = announcements();
-        assert_eq!(anns.len(), 3);
+        assert_eq!(anns.len(), 5);
         for a in &anns {
             assert!(is_valid(a), "{:?}", errors(a));
             assert!(validate(a).is_ok(), "{:?}", errors(a));
@@ -364,6 +378,8 @@ mod tests {
         assert_eq!(kind(&anns[0]).unwrap(), Kind::HeadAnnouncement);
         assert_eq!(kind(&anns[1]).unwrap(), Kind::SubmissionAnnouncement);
         assert_eq!(kind(&anns[2]).unwrap(), Kind::ReceiptAnnouncement);
+        assert_eq!(kind(&anns[3]).unwrap(), Kind::MessageAnnouncement);
+        assert_eq!(kind(&anns[4]).unwrap(), Kind::ProfileAnnouncement);
     }
 
     #[test]

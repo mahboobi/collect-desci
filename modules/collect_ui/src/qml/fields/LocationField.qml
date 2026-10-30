@@ -140,8 +140,10 @@ FieldBase {
                             Accessible.name: axis.modelData.label + " for " + root.field.label
                             onTextEdited: {
                                 var n = Number(text);
+                                // Cleared or not a number: forget the old
+                                // value, so a stale one cannot be submitted.
                                 if (text === "" || isNaN(n))
-                                    return;
+                                    n = undefined;
                                 if (axis.modelData.key === "lat")
                                     root.lat = n;
                                 else
@@ -157,9 +159,10 @@ FieldBase {
             }
         }
 
-        // What will actually be stored, and how precise it is.
+        // What will actually be stored, and how precise it is. Not shown for
+        // a position that will not be stored at all.
         Column {
-            visible: !root.blank
+            visible: !root.blank && root.problem === ""
             width: parent.width
             spacing: Theme.s4
 

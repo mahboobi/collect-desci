@@ -34,4 +34,14 @@ class CollectUi
     // the method names in Core.qml and a second copy here would be a second
     // thing to keep in step.
     SLOT(QString call(QString method, QString request))
+
+    // Whether this platform has the native image chooser below. False means
+    // the view falls back to QtQuick.Dialogs, then to a typed path.
+    PROP(bool nativePicker=false READONLY)
+
+    // Open the system's image chooser. Answers through imagePicked, with an
+    // empty path when the person cancelled. `purpose` comes back unchanged so
+    // the view knows which screen asked.
+    SLOT(void pickImage(QString purpose, QString title))
+    SIGNAL(imagePicked(QString purpose, QString path))
 }

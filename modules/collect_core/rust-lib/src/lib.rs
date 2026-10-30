@@ -516,9 +516,11 @@ impl CollectCoreModule for Collect {
         let announcing = self.session().can_announce();
         let courier = self.session().courier_description();
         let rln = self.session().rln_status();
+        let connection = self.session().connection();
         serde_json::json!({
             "ok": true,
             "data": {
+                "connection": connection,
                 "attached": courier.is_some(),
                 "courier": courier,
                 "announcing": announcing,
@@ -549,7 +551,7 @@ impl CollectCoreModule for Collect {
         // makes the dotted SPEC section 6 names work through one entry point;
         // without this they fell through to unknown_method.
         let now = chrono::Utc::now();
-        match method.as_str() {
+        let response = match method.as_str() {
             "identity.me" => self.identity_me(),
             "experiments.list" => self.session().list(now),
             "experiments.get" => self.session().get(&request),
@@ -558,6 +560,8 @@ impl CollectCoreModule for Collect {
             "results.list" => self.session().results(&request),
             "experiments.publish" => self.session().publish_now(&request),
             "experiments.update" => self.session().update(&request, now),
+            "experiments.setThumbnail" => self.session().set_thumbnail(&request),
+            "experiments.clearThumbnail" => self.session().clear_thumbnail(&request),
             "submitters.hide" => self.session().set_hidden(&request, true, now),
             "submitters.show" => self.session().set_hidden(&request, false, now),
             "results.export" => self.session().export(&request, now),
@@ -567,8 +571,22 @@ impl CollectCoreModule for Collect {
             "delivery.publishHead" => self.session().publish_head(&request, now),
             "delivery.announceSubmission" => self.session().announce_submission(&request, now),
             "delivery.deliver" => self.session().deliver(&request, now),
+            // The profile is a local file and needs no other module.
+            "profile.get" => self.local().profile_get(),
+            "profile.save" => self.local().profile_save(&request),
+            "profile.setPhoto" => self.local().profile_set_photo(&request),
+            "profile.clearPhoto" => self.local().profile_clear_photo(),
+            "messages.list" => self.session().messages_list(&request),
+            "messages.send" => self.session().messages_send(&request, now),
+            "members.list" => self.session().members_list(&request),
             _ => api::dispatch(&method, &request),
+        };
+        // Whatever the call changed is on disk before the answer goes back,
+        // so a relaunch or an update finds the same experiments (SPEC Q8).
+        if let Some(session) = self.session.as_mut() {
+            session.save_state();
         }
+        response
     }
 
     fn on_context_ready(&mut self, ctx: &RustModuleContext) {

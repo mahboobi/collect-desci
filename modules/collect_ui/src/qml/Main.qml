@@ -9,6 +9,7 @@ import QtQuick
 import QtQuick.Controls
 import collect
 import "screens"
+import "components"
 
 Item {
     id: app
@@ -17,12 +18,29 @@ Item {
     property double nowMs: Date.now()
 
     // home | detail | form | submitted | new | edit | builder | results
+    // | profile | discussion
     property string page: "home"
+    /// Where the profile screen's Back goes.
+    property string pageBeforeProfile: "home"
+    /// profile.get data, and the problems from the last save.
+    property var profileData: null
+    property var profileProblems: ({})
+    property bool profileBusy: false
+    property string profileNote: ""
+    /// messages.list and members.list for the open experiment.
+    property var discussionThread: null
+    property var discussionPeople: null
+    property bool discussionSending: false
+    property string discussionError: ""
     property string openExperimentId: ""
     property bool openMine: false
     property var activeProtocol: null
     property string lastCid: ""
     property bool receiptSeen: false
+    // delivery.status's reading for the dashboard's dot. Offline until
+    // collect_core answers, which is also the truth before then.
+    property var connection: ({ level: "offline", reason: "Connecting to collect_core\u2026" })
+    property bool refreshing: false
     property var createProblems: ({})
     property var builderProblems: ({})
     /// The protocol being edited, or null when adding a new one.
@@ -43,6 +61,10 @@ Item {
     property bool openPublished: false
     property string openCid: ""
     property var openPublishError: null
+    // The open experiment's cover image (a data URI) and its upload state.
+    property string openThumbnail: ""
+    property bool thumbnailBusy: false
+    property string thumbnailError: ""
 
     // The typed replica for this module's own backend. Null until the view
     // module is ready, so every read is guarded.
@@ -58,11 +80,22 @@ Item {
     /// the backend sets once it has talked to collect_core.
     readonly property bool ready: app.backend !== null && app.backend.coreReady === true
 
+    /// The backend's own image chooser (macOS). See collect_ui_backend.h.
+    readonly property bool nativePicker: app.backend !== null && app.backend.nativePicker === true
+    // The profile's share switch at the moment a photo was asked for, since
+    // the answer arrives later through a signal.
+    property bool pickShare: false
+
     anchors.fill: parent
 
     Rectangle {
         anchors.fill: parent
         color: Theme.ground
+    }
+
+    // The notebook the whole module sits on.
+    GridPaper {
+        anchors.fill: parent
     }
 
     // `documents` is a .rep PROP carrying experiments.list, so this fires
@@ -72,6 +105,15 @@ Item {
         enabled: app.backend !== null
         function onDocumentsChanged() {
             app.ingestList();
+        }
+        // The native chooser's answer; an empty path is a cancel.
+        function onImagePicked(purpose, path) {
+            if (path === "")
+                return;
+            if (purpose === "thumbnail")
+                app.setThumbnail(path);
+            else if (purpose === "profile")
+                app.setProfilePhoto(path, app.pickShare);
         }
     }
 
@@ -116,6 +158,8 @@ Item {
     }
 
     function openExperiment(experimentId, mine) {
+        if (experimentId !== app.openExperimentId)
+            app.thumbnailError = "";
         app.openExperimentId = experimentId;
         app.openMine = mine;
         app.call("experiments.get", { experimentId: experimentId }, function (data) {
@@ -127,6 +171,7 @@ Item {
             app.openPublished = data.published === true;
             app.openCid = data.cid ? data.cid : "";
             app.openPublishError = data.publish_error ? data.publish_error : null;
+            app.openThumbnail = data.thumbnail ? data.thumbnail : "";
             app.page = "detail";
         });
     }
@@ -155,6 +200,105 @@ Item {
                         if (onFail)
                             onFail();
                     });
+    }
+
+    /// Like call(), but hands back the whole envelope, failures included,
+    /// without touching the banner. For screens that put a failure next to
+    /// the field it is about.
+    function callEnvelope(method, request, onEnvelope) {
+        if (!app.ready) {
+            onEnvelope({ ok: false, error: { code: "not_wired", message: "collect_core is not reachable yet" } });
+            return;
+        }
+        logos.watch(app.backend.call(method, JSON.stringify(request)), // qmllint disable unqualified
+                    function (reply) {
+                        var envelope;
+                        try {
+                            envelope = JSON.parse(reply);
+                        } catch (e) {
+                            envelope = { ok: false, error: { code: "bad_reply", message: method + " returned no JSON" } };
+                        }
+                        onEnvelope(envelope);
+                    },
+                    function (error) {
+                        onEnvelope({ ok: false, error: { code: "transport", message: method + ": " + error } });
+                    });
+    }
+
+    // ---- profile ----
+
+    function openProfile() {
+        if (app.page !== "profile")
+            app.pageBeforeProfile = app.page;
+        app.profileProblems = ({});
+        app.profileNote = "";
+        app.call("profile.get", {}, function (data) {
+            app.profileData = data;
+            app.page = "profile";
+        });
+    }
+
+    function saveProfile(fields) {
+        app.profileBusy = true;
+        app.callEnvelope("profile.save", { fields: fields }, function (e) {
+            app.profileBusy = false;
+            if (e.ok) {
+                app.profileData = e.data;
+                app.profileProblems = ({});
+                app.profileNote = "Saved. Shared fields reach your projects' members on the next sync.";
+                return;
+            }
+            app.profileProblems = e.error && e.error.problems ? e.error.problems : ({});
+            if (!e.error || !e.error.problems)
+                Core.reportFailure(e.error ? e.error.message : "The profile was not saved.");
+        });
+    }
+
+    function setProfilePhoto(url, share) {
+        app.profileBusy = true;
+        app.callEnvelope("profile.setPhoto", { path: url, share: share }, function (e) {
+            app.profileBusy = false;
+            if (e.ok) {
+                app.profileData = e.data;
+                app.profileProblems = ({});
+                return;
+            }
+            app.profileProblems = { photo: e.error ? e.error.message : "That photo could not be used." };
+        });
+    }
+
+    // ---- discussion ----
+
+    function openDiscussion() {
+        app.discussionError = "";
+        app.loadDiscussion(function () { app.page = "discussion"; });
+    }
+
+    function loadDiscussion(then) {
+        app.call("messages.list", { experimentId: app.openExperimentId }, function (data) {
+            app.discussionThread = data;
+            app.call("members.list", { experimentId: app.openExperimentId }, function (people) {
+                app.discussionPeople = people;
+                if (then)
+                    then();
+            });
+        });
+    }
+
+    function sendMessage(text, onSent) {
+        app.discussionSending = true;
+        app.discussionError = "";
+        app.callEnvelope("messages.send", { experimentId: app.openExperimentId, text: text }, function (e) {
+            app.discussionSending = false;
+            if (!e.ok) {
+                // Kept on the screen, next to the text that did not go, rather
+                // than in the banner: the person is still composing.
+                app.discussionError = e.error ? e.error.message : "The message was not sent.";
+                return;
+            }
+            onSent();
+            app.loadDiscussion(null);
+        });
     }
 
     /// Open the results table for one form.
@@ -215,6 +359,75 @@ Item {
                      // hidden list both come from it.
                      app.openResults(app.resultsProtocolId, false);
                  });
+    }
+
+    function checkConnection() {
+        if (!app.ready) {
+            app.connection = { level: "offline", reason: "collect_core is not reachable yet." };
+            return;
+        }
+        app.callQuietly("delivery.status", {}, function (data) {
+            if (data.connection)
+                app.connection = data.connection;
+        });
+    }
+
+    /// The dashboard's refresh button: anything that arrived, then the list,
+    /// then the connection, in that order so the list includes what the
+    /// drain just indexed.
+    function refreshAll() {
+        if (!app.ready) {
+            app.checkConnection();
+            return;
+        }
+        app.refreshing = true;
+        // Cleared by a timer as well as by the replies: a call that never
+        // answers must not leave the button disabled for good.
+        refreshGuard.restart();
+        app.drainQuietly(function () {
+            app.call("experiments.list", {}, function (data) {
+                Core.cards = data.experiments ? data.experiments : [];
+                app.checkConnection();
+                app.refreshing = false;
+            });
+        });
+    }
+
+    Timer {
+        id: refreshGuard
+        interval: 10000
+        onTriggered: app.refreshing = false
+    }
+
+    // ---- cover image ----
+
+    /// Set or replace the open experiment's cover. A new manifest version
+    /// comes back, so the whole experiment is reloaded rather than patched.
+    function setThumbnail(url) {
+        app.thumbnailBusy = true;
+        app.thumbnailError = "";
+        app.callEnvelope("experiments.setThumbnail",
+                         { experimentId: app.openExperimentId, path: url },
+                         function (e) { app.thumbnailDone(e); });
+    }
+
+    function clearThumbnail() {
+        app.thumbnailBusy = true;
+        app.thumbnailError = "";
+        app.callEnvelope("experiments.clearThumbnail", { experimentId: app.openExperimentId },
+                         function (e) { app.thumbnailDone(e); });
+    }
+
+    function thumbnailDone(e) {
+        app.thumbnailBusy = false;
+        if (!e.ok) {
+            app.thumbnailError = e.error && e.error.message ? e.error.message
+                                                             : "The cover image was not changed.";
+            return;
+        }
+        app.openThumbnail = e.data.thumbnail ? e.data.thumbnail : "";
+        app.openExperiment(app.openExperimentId, app.openMine);
+        app.refreshList();
     }
 
     function refreshList() {
@@ -294,6 +507,8 @@ Item {
             case "edit":      return editPage;
             case "builder":   return builderPage;
             case "results":   return resultsPage;
+            case "profile":   return profilePage;
+            case "discussion": return discussionPage;
             default:          return homePage;
             }
         }
@@ -304,6 +519,9 @@ Item {
 
         Home {
             cards: Core.cards
+            connection: app.connection
+            refreshing: app.refreshing
+            onRefresh: app.refreshAll()
             onOpenExperiment: function (experimentId, mine) { app.openExperiment(experimentId, mine); }
             onNewExperiment: {
                 app.createProblems = ({});
@@ -322,11 +540,19 @@ Item {
             published: app.openPublished
             cid: app.openCid
             publishError: app.openPublishError
+            thumbnail: app.openThumbnail
+            thumbnailBusy: app.thumbnailBusy
+            thumbnailError: app.thumbnailError
+            onPickThumbnail: function (url) { app.setThumbnail(url); }
+            nativePicker: app.nativePicker
+            onRequestThumbnailPick: app.backend.pickImage("thumbnail", "Choose a cover image")
+            onClearThumbnail: app.clearThumbnail()
             onPublishNow: {
                 app.call("experiments.publish", { experimentId: app.openExperimentId },
                          function () { app.openExperiment(app.openExperimentId, true); });
             }
             onBack: app.page = "home"
+            onOpenDiscussion: app.openDiscussion()
             onAddProtocol: {
                 app.editingProtocol = null;
                 app.builderProblems = ({});
@@ -358,6 +584,95 @@ Item {
                     app.page = "form";
             }
         }
+    }
+
+    Component {
+        id: profilePage
+
+        Profile {
+            profile: app.profileData
+            problems: app.profileProblems
+            busy: app.profileBusy
+            savedNote: app.profileNote
+            onBack: app.page = app.pageBeforeProfile
+            onSave: function (fields) { app.saveProfile(fields); }
+            onPickPhoto: function (url, share) { app.setProfilePhoto(url, share); }
+            nativePicker: app.nativePicker
+            onRequestPhotoPick: function (share) {
+                app.pickShare = share;
+                app.backend.pickImage("profile", "Choose a profile photo");
+            }
+            onClearPhoto: {
+                app.call("profile.clearPhoto", {}, function (data) { app.profileData = data; });
+            }
+        }
+    }
+
+    Component {
+        id: discussionPage
+
+        Discussion {
+            id: discussion
+            experiment: Core.experimentDoc
+            thread: app.discussionThread
+            people: app.discussionPeople
+            sending: app.discussionSending
+            sendError: app.discussionError
+            onBack: app.page = "detail"
+            onSend: function (text) { app.sendMessage(text, function () { discussion.clearComposer(); }); }
+        }
+    }
+
+    // The profile, from anywhere: top right, above every page.
+    Button {
+        id: profileButton
+        anchors.top: errorBanner.bottom
+        anchors.right: parent.right
+        anchors.topMargin: Theme.s16
+        anchors.rightMargin: Theme.s20
+        z: 5
+        visible: app.ready && app.page !== "profile"
+        width: profileLabel.implicitWidth + Theme.touchTarget + Theme.s12
+        height: Theme.touchTarget
+        Accessible.name: "Open your science profile"
+        onClicked: app.openProfile()
+        contentItem: Row {
+            spacing: Theme.s8
+            Text {
+                id: profileLabel
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Profile"
+                font.family: Theme.sans
+                font.pixelSize: Theme.small
+                font.weight: Theme.medium
+                color: Theme.ink2
+            }
+            Avatar {
+                anchors.verticalCenter: parent.verticalCenter
+                size: 36
+                photo: app.profileData && app.profileData.fields && app.profileData.fields.photo.value
+                       ? app.profileData.fields.photo.value : ""
+                name: app.profileData && app.profileData.fields && app.profileData.fields.alias.value
+                      ? app.profileData.fields.alias.value : ""
+                fallback: "☺"
+            }
+        }
+        background: Rectangle {
+            radius: Theme.rPill
+            color: profileButton.down ? Theme.surfaceSunken : Theme.surface
+            border.width: 1
+            border.color: Theme.line
+        }
+    }
+
+    // Load the profile once, so the button shows the person's photo, and
+    // read the connection straight away rather than at the first timer tick.
+    // The only `onReadyChanged` in this file: a second one is a compile
+    // error that stops the whole app opening.
+    onReadyChanged: {
+        app.checkConnection();
+        if (app.ready && app.profileData === null)
+            app.callQuietly("profile.get", {}, function (data) { app.profileData = data; });
     }
 
     Component {
@@ -521,10 +836,27 @@ Item {
     Timer {
         // `ready`, not `backend !== null`: see the property's note.
         running: app.ready
-        interval: 15000
+        // Faster while a discussion is open, so a reply shows in seconds.
+        interval: app.page === "discussion" ? 4000 : 15000
         repeat: true
         triggeredOnStart: true
-        onTriggered: app.callQuietly("delivery.drain", {}, function (data) {
+        onTriggered: {
+            app.checkConnection();
+            app.drainQuietly();
+        }
+    }
+
+    /// Collect what Delivery has brought in, then `then()` if given.
+    function drainQuietly(then) {
+        app.callQuietly("delivery.drain", {}, function (data) {
+            // A cover image arrived for an experiment on screen.
+            if (data.thumbnails_fetched > 0) {
+                if (data.handled === 0)
+                    app.refreshList();
+                if (app.page === "detail" && app.openExperimentId !== "")
+                    app.callQuietly("experiments.get", { experimentId: app.openExperimentId },
+                                    function (d) { app.openThumbnail = d.thumbnail ? d.thumbnail : ""; });
+            }
             if (data.handled > 0) {
                 app.refreshList();
                 // A submission may have landed in the table on screen.
@@ -532,8 +864,11 @@ Item {
                     app.openResults(app.resultsProtocolId, false);
             }
             var seen = data.results ? data.results : [];
+            var talk = false;
             for (var i = 0; i < seen.length; i++) {
                 var r = seen[i];
+                if ((r.kind === "message" || r.kind === "profile") && r.experiment === app.openExperimentId)
+                    talk = true;
                 if (r.kind === "receipt" && r.cid === app.lastCid)
                     app.receiptSeen = true;
                 // A send that the network refused is about something the
@@ -542,6 +877,10 @@ Item {
                 if (r.reason === "send_failed")
                     Core.reportFailure("An announcement was refused by the network: " + r.detail);
             }
+            if (talk && app.page === "discussion")
+                app.loadDiscussion(null);
+            if (then)
+                then();
         });
     }
 

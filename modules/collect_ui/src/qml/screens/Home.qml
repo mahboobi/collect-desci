@@ -16,8 +16,24 @@ Flickable {
     // Dashboard cards from experiments.list.
     required property var cards
 
+    // delivery.status's `connection`: { level: online | degraded | offline,
+    // reason }. Offline until the first answer, which is what it is.
+    property var connection: ({ level: "offline", reason: "Not checked yet." })
+    // A refresh is in flight: the icon spins and the button waits.
+    property bool refreshing: false
+
     signal openExperiment(string experimentId, bool mine)
     signal newExperiment()
+    signal refresh()
+
+    readonly property string connectionLevel: screen.connection && screen.connection.level
+                                              ? screen.connection.level : "offline"
+    readonly property string connectionLabel: screen.connectionLevel === "online" ? "Online"
+                                              : screen.connectionLevel === "degraded" ? "Weak connection"
+                                              : "Offline"
+    readonly property color connectionColor: screen.connectionLevel === "online" ? Theme.statusOnline
+                                             : screen.connectionLevel === "degraded" ? Theme.statusDegraded
+                                             : Theme.statusOffline
 
     readonly property var mine: screen.cards.filter(function (c) { return c.mine === true; })
     readonly property var joined: screen.cards.filter(function (c) { return c.mine !== true; })
@@ -39,7 +55,7 @@ Flickable {
             spacing: Theme.s16
 
             Column {
-                width: parent.width - newButton.width - Theme.s16
+                width: parent.width - actions.width - Theme.s16
                 spacing: Theme.s4
 
                 Text {
@@ -61,27 +77,142 @@ Flickable {
                 }
             }
 
-            Button {
-                id: newButton
+            Row {
+                id: actions
                 anchors.verticalCenter: parent.verticalCenter
-                height: Theme.touchTarget
-                leftPadding: Theme.s24
-                rightPadding: Theme.s24
-                text: "New experiment"
-                Accessible.name: "Create a new experiment"
-                onClicked: screen.newExperiment()
+                spacing: Theme.s12
 
-                contentItem: Text {
-                    text: newButton.text
-                    font.family: Theme.sans
-                    font.pixelSize: Theme.body
-                    font.weight: Theme.medium
-                    color: Theme.textOnAccent
-                    verticalAlignment: Text.AlignVCenter
-                }
-                background: Rectangle {
+                // The connection dot. Focusable so the reason is reachable from
+                // the keyboard as well as by hovering.
+                Rectangle {
+                    id: status
+                    anchors.verticalCenter: parent.verticalCenter
+                    height: Theme.touchTarget
+                    width: statusRow.implicitWidth + Theme.s24
                     radius: Theme.rControl
-                    color: newButton.down ? Theme.accentHover : Theme.accent
+                    color: statusArea.containsMouse || status.activeFocus ? Theme.surfaceSunken : "transparent"
+                    activeFocusOnTab: true
+                    Accessible.role: Accessible.StaticText
+                    Accessible.name: "Connection: " + screen.connectionLabel + ". "
+                                     + (screen.connection && screen.connection.reason ? screen.connection.reason : "")
+
+                    Row {
+                        id: statusRow
+                        anchors.centerIn: parent
+                        spacing: Theme.s8
+
+                        Rectangle {
+                            objectName: "connectionDot"
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 10
+                            height: 10
+                            radius: 5
+                            color: screen.connectionColor
+                        }
+
+                        Text {
+                            objectName: "connectionLabel"
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: screen.connectionLabel
+                            font.family: Theme.sans
+                            font.pixelSize: Theme.small
+                            color: Theme.ink2
+                        }
+                    }
+
+                    MouseArea {
+                        id: statusArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                    }
+
+                    ToolTip.visible: statusArea.containsMouse || status.activeFocus
+                    ToolTip.delay: 300
+                    ToolTip.text: screen.connection && screen.connection.reason ? screen.connection.reason : ""
+                }
+
+                Button {
+                    id: refreshButton
+                    objectName: "refreshButton"
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Theme.touchTarget
+                    height: Theme.touchTarget
+                    enabled: !screen.refreshing
+                    Accessible.name: screen.refreshing ? "Refreshing" : "Refresh experiments and connection"
+                    ToolTip.visible: hovered
+                    ToolTip.delay: 300
+                    ToolTip.text: "Refresh"
+                    onClicked: screen.refresh()
+
+                    // Drawn rather than a glyph: the bundled fonts carry no
+                    // circular arrow, and a missing glyph renders as a box.
+                    contentItem: Canvas {
+                        id: arrow
+                        width: 20
+                        height: 20
+                        property color ink: Theme.ink2
+                        onInkChanged: requestPaint()
+                        onPaint: {
+                            var c = getContext("2d");
+                            c.reset();
+                            c.strokeStyle = arrow.ink;
+                            c.fillStyle = arrow.ink;
+                            c.lineWidth = 2;
+                            c.lineCap = "round";
+                            var cx = width / 2, cy = height / 2, r = 7;
+                            c.beginPath();
+                            c.arc(cx, cy, r, -Math.PI * 0.35, Math.PI * 1.45);
+                            c.stroke();
+                            // Arrowhead at the arc's open end.
+                            var a = -Math.PI * 0.35;
+                            var ex = cx + r * Math.cos(a), ey = cy + r * Math.sin(a);
+                            c.beginPath();
+                            c.moveTo(ex + 4, ey - 1);
+                            c.lineTo(ex - 1, ey - 4);
+                            c.lineTo(ex - 1, ey + 3);
+                            c.closePath();
+                            c.fill();
+                        }
+
+                        RotationAnimator on rotation {
+                            running: screen.refreshing
+                            from: 0
+                            to: 360
+                            duration: 900
+                            loops: Animation.Infinite
+                            onRunningChanged: if (!running) arrow.rotation = 0
+                        }
+                    }
+                    background: Rectangle {
+                        radius: Theme.rControl
+                        color: refreshButton.down ? Theme.surfaceSunken : Theme.surface
+                        border.color: refreshButton.activeFocus ? Theme.accent : Theme.line
+                        border.width: 1
+                    }
+                }
+
+                Button {
+                    id: newButton
+                    anchors.verticalCenter: parent.verticalCenter
+                    height: Theme.touchTarget
+                    leftPadding: Theme.s24
+                    rightPadding: Theme.s24
+                    text: "New experiment"
+                    Accessible.name: "Create a new experiment"
+                    onClicked: screen.newExperiment()
+
+                    contentItem: Text {
+                        text: newButton.text
+                        font.family: Theme.sans
+                        font.pixelSize: Theme.body
+                        font.weight: Theme.medium
+                        color: Theme.textOnAccent
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        radius: Theme.rControl
+                        color: newButton.down ? Theme.accentHover : Theme.accent
+                    }
                 }
             }
         }

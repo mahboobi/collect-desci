@@ -32,6 +32,18 @@ QtObject {
     readonly property color amberTint: "#FBEFD9"
     readonly property color slate: "#3D4A5C"         // neutral, draft, negative result
     readonly property color slateTint: "#E6EAF0"
+    // Connection dot only: brighter than the ledger colours on purpose, since
+    // a dot this small has to read at a glance.
+    readonly property color statusOnline: "#1E9E5A"
+    readonly property color statusDegraded: "#E58A00"
+    readonly property color statusOffline: "#D23B2E"
+    // Graph-paper grid behind the module and in empty image areas: the lab
+    // notebook the app is standing in for. Tinted with the accent and kept
+    // faint, so it reads as paper rather than as content.
+    readonly property color gridMinor: Qt.rgba(11 / 255, 110 / 255, 79 / 255, 0.045)
+    readonly property color gridMajor: Qt.rgba(11 / 255, 110 / 255, 79 / 255, 0.10)
+    readonly property int gridStep: 16
+    readonly property int gridMajorEvery: 5
     readonly property color backdrop: Qt.rgba(21 / 255, 24 / 255, 28 / 255, 0.48)
     readonly property color modalShadow: Qt.rgba(21 / 255, 24 / 255, 28 / 255, 0.24)
 

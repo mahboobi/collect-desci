@@ -12,6 +12,7 @@
 
 use crate::delivery::{self, Courier};
 use crate::store::{self, DocumentStore};
+use crate::social::{Received, Social};
 use crate::{api, export, fields, identity::Identity, ids, schema};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
@@ -114,6 +115,17 @@ pub struct Session {
     /// The latest `head` each experiment's creator announced, by experiment.
     /// How a submitter learns there is a newer manifest or index to fetch.
     heads: BTreeMap<String, Value>,
+    /// Profile, project members and discussion. Never touches Storage.
+    social: Social,
+    /// The state file's text as last written or read, so a call that changed
+    /// nothing does not rewrite it. See `save_state`.
+    saved_state: Option<String>,
+    /// Thumbnails ready to show, as data URIs by sha256. Filled from the
+    /// cache directory on first use, so a list does not re-read the files.
+    thumbs: std::cell::RefCell<BTreeMap<String, String>>,
+    /// Thumbnails already looked for on the network this run, by sha256, so
+    /// one that cannot be found is not asked for on every drain.
+    thumbs_tried: std::collections::BTreeSet<String>,
 }
 
 impl Default for Session {
@@ -138,10 +150,14 @@ impl Session {
             publications: BTreeMap::new(),
             publish_until: None,
             state_dir: None,
+            saved_state: None,
+            thumbs: Default::default(),
+            thumbs_tried: Default::default(),
             courier: None,
             seen: delivery::Seen::default(),
             receipts: BTreeMap::new(),
             heads: BTreeMap::new(),
+            social: Social::default(),
         };
         if api::fixtures_enabled() {
             session.seed_fixtures();
@@ -345,11 +361,143 @@ impl Session {
         let public = identity.public_hex();
         self.state_dir = Some(Path::new(persistence_path).to_path_buf());
         self.identity = Some(identity);
+        // Logged, not fatal: a profile that will not load must not stop the
+        // node signing, and it is never overwritten.
+        if let Err(e) = self.social.attach(Path::new(persistence_path)) {
+            eprintln!("collect_core: profile and discussion unavailable: {e}");
+        }
+        self.load_state();
         self.creator_key = public.clone();
         if api::fixtures_enabled() {
             self.reauthor_fixtures();
         }
         Ok(public)
+    }
+
+    /// Read back what an earlier run saved.
+    ///
+    /// Experiments used to live only in memory, so every relaunch — and every
+    /// module update — started the dashboard empty although the documents
+    /// were still on Storage. Each document is re-checked against the schema
+    /// on the way in, so a damaged or hand-edited file drops that document
+    /// rather than putting an invalid one on screen. A file that will not
+    /// parse is moved aside, never overwritten, and the run starts empty.
+    fn load_state(&mut self) {
+        if api::fixtures_enabled() {
+            return;
+        }
+        let Some(dir) = self.state_dir.clone() else {
+            return;
+        };
+        let path = dir.join(STATE_FILE);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => {
+                eprintln!("collect_core: cannot read {}: {e}", path.display());
+                return;
+            }
+        };
+        let state: Value = match serde_json::from_str(&text) {
+            Ok(state) => state,
+            Err(e) => {
+                let aside = dir.join(format!("{STATE_FILE}.unreadable"));
+                eprintln!(
+                    "collect_core: {} is not JSON ({e}); moved to {}",
+                    path.display(),
+                    aside.display()
+                );
+                let _ = std::fs::rename(&path, &aside);
+                return;
+            }
+        };
+        let docs = |key: &str, kind: schema::Kind| -> Vec<Value> {
+            let mut kept = Vec::new();
+            for doc in state[key].as_array().into_iter().flatten() {
+                let errors = schema::errors_as(doc, kind);
+                if errors.is_empty() {
+                    kept.push(doc.clone());
+                } else {
+                    eprintln!("collect_core: dropping a saved {key} entry: {}", errors.join("; "));
+                }
+            }
+            kept
+        };
+        self.experiments = docs("experiments", schema::Kind::Experiment);
+        self.protocols = docs("protocols", schema::Kind::Protocol);
+        self.submissions = docs("submissions", schema::Kind::Submission);
+        self.index_pages = docs("index_pages", schema::Kind::Index);
+        // Only what reached Storage is kept: a failure is reported once, and
+        // after a restart the document is offered for publishing again.
+        if let Some(map) = state["published"].as_object() {
+            for (id, cid) in map {
+                if let Some(cid) = cid.as_str() {
+                    self.publications.insert(id.clone(), Publication::Published(cid.to_string()));
+                }
+            }
+        }
+        for (field, key) in [(&mut self.receipts, "receipts"), (&mut self.heads, "heads")] {
+            if let Some(map) = state[key].as_object() {
+                field.extend(map.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+        }
+        for hash in state["seen"].as_array().into_iter().flatten() {
+            if let Some(hash) = hash.as_str() {
+                self.seen.accept(hash);
+            }
+        }
+        self.saved_state = Some(text);
+        eprintln!(
+            "collect_core: restored {} experiment(s), {} form(s), {} submission(s)",
+            self.experiments.len(),
+            self.protocols.len(),
+            self.submissions.len()
+        );
+    }
+
+    /// Write what this node knows, if it changed since the last write.
+    ///
+    /// Called after every call into the module, so no method has to remember
+    /// to. The documents are all signed and public already; the file is kept
+    /// owner-only anyway, like every file here. Written to a temporary name
+    /// and renamed, so a crash mid-write leaves the previous state intact.
+    pub fn save_state(&mut self) {
+        if api::fixtures_enabled() {
+            return;
+        }
+        let Some(dir) = self.state_dir.clone() else {
+            return;
+        };
+        let published: serde_json::Map<String, Value> = self
+            .publications
+            .iter()
+            .filter_map(|(id, p)| p.cid().map(|cid| (id.clone(), json!(cid))))
+            .collect();
+        let state = json!({
+            "version": 1,
+            "experiments": self.experiments,
+            "protocols": self.protocols,
+            "submissions": self.submissions,
+            "index_pages": self.index_pages,
+            "published": published,
+            "receipts": self.receipts,
+            "heads": self.heads,
+            "seen": self.seen.hashes().collect::<Vec<_>>(),
+        });
+        let Ok(text) = serde_json::to_string(&state) else {
+            return;
+        };
+        if self.saved_state.as_deref() == Some(text.as_str()) {
+            return;
+        }
+        let path = dir.join(STATE_FILE);
+        let temp = dir.join(format!("{STATE_FILE}.tmp"));
+        let written = crate::profile::write_private(&temp, text.as_bytes())
+            .and_then(|_| std::fs::rename(&temp, &path));
+        match written {
+            Ok(()) => self.saved_state = Some(text),
+            Err(e) => eprintln!("collect_core: cannot save {}: {e}", path.display()),
+        }
     }
 
     /// Re-sign the seeded example under this node's key.
@@ -648,6 +796,7 @@ impl Session {
             "link": ids::link(id, self.cid_of(id).unwrap_or("logos:pending")),
             "published": self.cid_of(id).is_some(),
             "cid": self.cid_of(id).map(Value::from).unwrap_or(Value::Null),
+            "thumbnail": self.thumbnail_uri(experiment).map(Value::from).unwrap_or(Value::Null),
         })
     }
 
@@ -717,9 +866,211 @@ impl Session {
             "experiment": experiment,
             "protocols": held,
             "missing_protocols": named.len() - held.len(),
+            // Ready to show, or null: none, or not on this node yet.
+            "thumbnail": self.thumbnail_uri(experiment).map(Value::from).unwrap_or(Value::Null),
         });
         merge(&mut data, self.publish_report(wanted));
         api::envelope_ok(data)
+    }
+
+    /// `experiments.setThumbnail {experimentId, path}` — give an experiment a
+    /// cover image.
+    ///
+    /// The photo is cleaned and cropped like any other (`media::thumbnail`),
+    /// put on Storage, and named in a new version of the manifest, so everyone
+    /// with the link sees it. Storage is required rather than optional here:
+    /// a manifest may only name media by CID, and a thumbnail nobody else
+    /// can fetch would be one only this screen shows.
+    pub fn set_thumbnail(&mut self, raw: &str) -> String {
+        let request: Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
+        };
+        let id = request.get("experimentId").and_then(Value::as_str).unwrap_or("").to_string();
+        if let Err(e) = self.may_edit(&id) {
+            return e;
+        }
+        let path = local_path(request.get("path").and_then(Value::as_str).unwrap_or(""));
+        if path.is_empty() {
+            return api::envelope_err(api::code::BAD_REQUEST, "`path` is required");
+        }
+        let original = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => return api::envelope_err(api::code::MEDIA, format!("cannot read the image: {e}")),
+        };
+        let thumb = match crate::media::thumbnail(&original) {
+            Ok(t) => t,
+            Err(e) => return api::envelope_err(api::code::MEDIA, e.to_string()),
+        };
+        let Some(store) = self.store.as_deref() else {
+            return api::envelope_err(
+                api::code::NOT_WIRED,
+                "Logos Storage is not reachable, and a thumbnail has to be on Storage for anyone else to see it",
+            );
+        };
+        let cid = match store
+            .put(&format!("thumbnail-{id}.jpg"), &thumb.bytes)
+            .and_then(|c| store::as_document_cid(&c))
+        {
+            Ok(cid) => cid,
+            Err(e) => return api::envelope_err(e.code(), format!("the thumbnail was not stored: {e}")),
+        };
+        self.cache_thumbnail(&thumb.sha256, &thumb.bytes);
+        let entry = thumb.media_entry(&cid);
+        if let Err(e) = self.reseal_with(&id, |doc| doc["thumbnail"] = entry) {
+            return api::envelope_err(api::code::REJECTED, e);
+        }
+        self.get(&json!({ "experimentId": id }).to_string())
+    }
+
+    /// `experiments.clearThumbnail {experimentId}` — back to no cover image.
+    ///
+    /// A new manifest version without the field. The image itself stays on
+    /// Storage, like everything published: nothing there can be withdrawn.
+    pub fn clear_thumbnail(&mut self, raw: &str) -> String {
+        let request: Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
+        };
+        let id = request.get("experimentId").and_then(Value::as_str).unwrap_or("").to_string();
+        if let Err(e) = self.may_edit(&id) {
+            return e;
+        }
+        let has = self
+            .experiments
+            .iter()
+            .any(|e| e.get("id").and_then(Value::as_str) == Some(&id) && e.get("thumbnail").is_some());
+        if has {
+            if let Err(e) = self.reseal_with(&id, |doc| {
+                if let Some(map) = doc.as_object_mut() {
+                    map.remove("thumbnail");
+                }
+            }) {
+                return api::envelope_err(api::code::REJECTED, e);
+            }
+        }
+        self.get(&json!({ "experimentId": id }).to_string())
+    }
+
+    /// Whether this node may make a new version of `id`, as an error envelope
+    /// if not. Checked before any work, so a refused thumbnail is not
+    /// uploaded first.
+    fn may_edit(&self, id: &str) -> Result<(), String> {
+        let Some(experiment) = self
+            .experiments
+            .iter()
+            .find(|e| e.get("id").and_then(Value::as_str) == Some(id))
+        else {
+            return Err(api::envelope_err(
+                api::code::BAD_REQUEST,
+                format!("no experiment `{id}` on this node"),
+            ));
+        };
+        if experiment.pointer("/creator/key").and_then(Value::as_str) != Some(self.creator_key.as_str()) {
+            return Err(api::envelope_err(
+                api::code::REJECTED,
+                "only the experiment's creator can change it",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The experiment's thumbnail as a data URI the UI can show, if this node
+    /// holds it.
+    ///
+    /// Never touches the network: this runs for every card in a list. A
+    /// thumbnail not held yet is fetched by `fetch_thumbnails` on the drain.
+    /// Whatever is shown must hash to the `sha256` the signed manifest names,
+    /// and be the image type it says.
+    fn thumbnail_uri(&self, experiment: &Value) -> Option<String> {
+        let entry = experiment.get("thumbnail")?;
+        let sha = entry.get("sha256").and_then(Value::as_str)?;
+        if let Some(uri) = self.thumbs.borrow().get(sha) {
+            return Some(uri.clone());
+        }
+        let path = self.state_dir.as_ref()?.join(THUMB_DIR).join(format!("{sha}.img"));
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                // Held by the local Storage node, as our own uploads are.
+                let cid = entry.get("cid").and_then(Value::as_str)?;
+                let bytes = self.store.as_deref()?.get(store::bare_cid(cid), true).ok()?;
+                if !thumbnail_matches(entry, &bytes) {
+                    return None;
+                }
+                self.cache_thumbnail(sha, &bytes);
+                bytes
+            }
+        };
+        if !thumbnail_matches(entry, &bytes) {
+            return None;
+        }
+        let mime = entry.get("mime").and_then(Value::as_str)?;
+        let uri = format!("data:{mime};base64,{}", data_encoding::BASE64.encode(&bytes));
+        self.thumbs.borrow_mut().insert(sha.to_string(), uri.clone());
+        Some(uri)
+    }
+
+    /// Keep a thumbnail's bytes beside the state, by sha256.
+    fn cache_thumbnail(&self, sha: &str, bytes: &[u8]) {
+        let Some(dir) = self.state_dir.as_ref().map(|d| d.join(THUMB_DIR)) else {
+            return;
+        };
+        let written = std::fs::create_dir_all(&dir)
+            .and_then(|_| std::fs::write(dir.join(format!("{sha}.img")), bytes));
+        if let Err(e) = written {
+            eprintln!("collect_core: cannot cache a thumbnail: {e}");
+        }
+    }
+
+    /// Fetch, from the network, thumbnails named by experiments this node
+    /// holds but has not got the image for — a submitter's case. Run from the
+    /// drain, which already waits on the network, and at most a couple per
+    /// run so one slow fetch cannot hold the drain up for long. Returns how
+    /// many arrived, so the UI knows to reload the list.
+    fn fetch_thumbnails(&mut self) -> usize {
+        let Some(store) = self.store.as_deref() else {
+            return 0;
+        };
+        let wanted: Vec<Value> = self
+            .experiments
+            .iter()
+            .filter_map(|e| e.get("thumbnail").cloned())
+            .filter(|t| {
+                t.get("sha256")
+                    .and_then(Value::as_str)
+                    .map(|sha| !self.thumbs_tried.contains(sha) && !self.thumbs.borrow().contains_key(sha))
+                    .unwrap_or(false)
+            })
+            .take(THUMB_FETCHES_PER_DRAIN)
+            .collect();
+        let mut fetched = 0;
+        for entry in wanted {
+            let (Some(sha), Some(cid)) = (
+                entry.get("sha256").and_then(Value::as_str),
+                entry.get("cid").and_then(Value::as_str),
+            ) else {
+                continue;
+            };
+            self.thumbs_tried.insert(sha.to_string());
+            let cached = self
+                .state_dir
+                .as_ref()
+                .map(|d| d.join(THUMB_DIR).join(format!("{sha}.img")).exists())
+                .unwrap_or(false);
+            if cached {
+                continue;
+            }
+            match store.get(store::bare_cid(cid), false) {
+                Ok(bytes) if thumbnail_matches(&entry, &bytes) => {
+                    self.cache_thumbnail(sha, &bytes);
+                    fetched += 1;
+                }
+                Ok(_) => eprintln!("collect_core: thumbnail {cid} does not match its manifest; not shown"),
+                Err(e) => eprintln!("collect_core: thumbnail {cid} not fetched: {e}"),
+            }
+        }
+        fetched
     }
 
     /// `experiments.create` — a new manifest from the C2 form.
@@ -938,6 +1289,57 @@ impl Session {
         self.courier.as_ref().map(|c| c.rln().as_json())
     }
 
+    /// One reading of how well this node is connected, for the dot on the
+    /// dashboard: `online`, `degraded` or `offline`, with the reason in words.
+    ///
+    /// Delivery's own `getConnectionStatus` decides most of it, because it is
+    /// the only part that knows about peers. Offline means nothing can reach
+    /// or leave this node. Degraded means something works and something does
+    /// not — few peers, no Storage, or no RLN membership to send with — which
+    /// is a different thing to fix, so it is a different colour.
+    pub fn connection(&self) -> Value {
+        let storage = self.store.is_some();
+        let Some(courier) = self.courier.as_deref() else {
+            return if storage {
+                json!({ "level": "degraded", "delivery": null, "storage": true,
+                        "reason": "Logos Delivery is not reachable: nothing can be announced or received." })
+            } else {
+                json!({ "level": "offline", "delivery": null, "storage": false,
+                        "reason": "Neither Logos Storage nor Logos Delivery is reachable." })
+            };
+        };
+        let status = courier.connection();
+        let level = |level: &str, reason: String| {
+            json!({ "level": level, "delivery": status, "storage": storage, "reason": reason })
+        };
+        match status.as_deref() {
+            Some("Disconnected") => {
+                return level("offline", "Logos Delivery has no peers.".into());
+            }
+            Some("PartiallyConnected") => {
+                return level("degraded", "Logos Delivery is only partly connected: messages may be slow.".into());
+            }
+            Some("Connected") => {}
+            Some(other) => {
+                return level("degraded", format!("Logos Delivery reports \u{201c}{other}\u{201d}."));
+            }
+            None => {
+                return level("degraded", "Logos Delivery did not say whether it is connected.".into());
+            }
+        }
+        if !storage {
+            return level("degraded", "Logos Storage is not reachable: new documents stay on this device.".into());
+        }
+        let rln = courier.rln();
+        if rln.required && !rln.ready {
+            return level(
+                "degraded",
+                format!("Connected, but this node cannot send yet: RLN membership is {}.", rln.state),
+            );
+        }
+        level("online", "Connected to Logos Storage and Logos Delivery.".into())
+    }
+
     /// Subscribe to the topics of every experiment this node cares about.
     ///
     /// Both roles need this and for the same reason: a creator receives
@@ -1095,6 +1497,187 @@ impl Session {
     /// The last step of SPEC 3.2 step 3, after the submission document is on
     /// Storage: the CID is the whole message, so this cannot be sent before
     /// the upload has one.
+    // ---------------------------------------------------- profile and discussion
+    //
+    // None of this reaches Logos Storage. The profile stays in the instance
+    // directory; messages and sealed profiles go over the experiment's
+    // Delivery topic and are kept locally. See `social`.
+
+    /// `profile.get`
+    pub fn profile_get(&self) -> String {
+        api::envelope_ok(self.social.profile_json())
+    }
+
+    /// `profile.save` — `{ "fields": { name: { "value", "share" } } }`.
+    pub fn profile_save(&mut self, raw: &str) -> String {
+        let request: Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
+        };
+        match self.social.save_profile(&request) {
+            Ok(profile) => api::envelope_ok(profile),
+            Err(detail) if detail.get("problems").is_some() => api::envelope_err_data(
+                api::code::INVALID_VALUES,
+                "Some profile fields need fixing.",
+                detail,
+            ),
+            Err(detail) => api::envelope_err(
+                api::code::REJECTED,
+                detail["message"].as_str().unwrap_or("the profile could not be saved"),
+            ),
+        }
+    }
+
+    /// `profile.setPhoto` — `{ "path", "share" }`, a file the person picked.
+    /// Read here because the QML sandbox cannot read files. The original is
+    /// never kept: only a small square copy with no metadata.
+    pub fn profile_set_photo(&mut self, raw: &str) -> String {
+        let request: Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
+        };
+        let share = request.get("share").and_then(Value::as_bool).unwrap_or(false);
+        let path = local_path(request.get("path").and_then(Value::as_str).unwrap_or(""));
+        if path.is_empty() {
+            return api::envelope_err(api::code::BAD_REQUEST, "`path` is required");
+        }
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => return api::envelope_err(api::code::MEDIA, format!("cannot read the photo: {e}")),
+        };
+        match self.social.set_photo(&bytes, share) {
+            Ok(profile) => api::envelope_ok(profile),
+            Err(e) => api::envelope_err(api::code::MEDIA, e),
+        }
+    }
+
+    /// `profile.clearPhoto`
+    pub fn profile_clear_photo(&mut self) -> String {
+        match self.social.clear_photo() {
+            Ok(profile) => api::envelope_ok(profile),
+            Err(e) => api::envelope_err(api::code::REJECTED, e),
+        }
+    }
+
+    /// The experiment named by `experimentId`, if this node holds it.
+    fn joined(&self, request: &Value) -> Result<(String, Option<String>), String> {
+        let Some(id) = request.get("experimentId").and_then(Value::as_str) else {
+            return Err(api::envelope_err(api::code::BAD_REQUEST, "`experimentId` is required"));
+        };
+        let Some(experiment) = self
+            .experiments
+            .iter()
+            .find(|e| e.get("id").and_then(Value::as_str) == Some(id))
+        else {
+            return Err(api::envelope_err(
+                api::code::BAD_REQUEST,
+                format!("experiment `{id}` is not open on this node"),
+            ));
+        };
+        let creator = experiment.pointer("/creator/key").and_then(Value::as_str).map(str::to_string);
+        Ok((id.to_string(), creator))
+    }
+
+    /// `messages.list` — `{ "experimentId" }`.
+    pub fn messages_list(&mut self, raw: &str) -> String {
+        let request: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+        let (id, creator) = match self.joined(&request) {
+            Ok(j) => j,
+            Err(e) => return e,
+        };
+        let me = self.creator_key.clone();
+        let mut data = self.social.list_messages(&id, &me);
+        if let Some(list) = data["messages"].as_array_mut() {
+            for m in list {
+                m["creator"] = json!(creator.as_deref() == m["from"].as_str());
+            }
+        }
+        data["can_send"] = json!(self.can_announce());
+        data["rln"] = self.rln_status().unwrap_or(Value::Null);
+        api::envelope_ok(data)
+    }
+
+    /// `messages.send` — `{ "experimentId", "text", "replyTo"? }`.
+    ///
+    /// Kept in history only once Delivery accepted it, so the list never
+    /// shows a message nobody else will see.
+    pub fn messages_send(&mut self, raw: &str, now: DateTime<Utc>) -> String {
+        let request: Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
+        };
+        let (id, _) = match self.joined(&request) {
+            Ok(j) => j,
+            Err(e) => return e,
+        };
+        let me = self.creator_key.clone();
+        let text = request.get("text").and_then(Value::as_str).unwrap_or("");
+        let reply_to = request.get("replyTo").and_then(Value::as_str);
+        let message = match self.social.compose(&id, &me, text, reply_to, now) {
+            Ok(m) => m,
+            Err(e) => return api::envelope_err(api::code::INVALID_VALUES, e),
+        };
+        let signed = match self.signed(&message) {
+            Ok(s) => s,
+            Err(e) => return api::envelope_err(api::code::NOT_WIRED, e),
+        };
+        if let Err(e) = self.announce(&id, &message, schema::Kind::MessageAnnouncement) {
+            return e;
+        }
+        match self.social.receive_message(&id, &signed, &me, now) {
+            Received::Kept(m) => api::envelope_ok(json!({ "sent": true, "message": m })),
+            _ => api::envelope_ok(json!({ "sent": true })),
+        }
+    }
+
+    /// `members.list` — `{ "experimentId" }`: who is in this project, and
+    /// what each has shared with us.
+    pub fn members_list(&self, raw: &str) -> String {
+        let request: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+        match self.joined(&request) {
+            Ok((id, creator)) => api::envelope_ok(self.social.list_members(&id, creator.as_deref())),
+            Err(e) => e,
+        }
+    }
+
+    /// Introduce ourselves, or re-seal our profile, on every experiment that
+    /// needs it. Called from `drain`, so it runs on the UI's timer. Returns
+    /// the experiments a profile went out on.
+    fn share_profiles(&mut self, now: DateTime<Utc>) -> Vec<String> {
+        if self.identity.is_none() || !self.can_announce() {
+            return Vec::new();
+        }
+        let me = self.creator_key.clone();
+        let ids: Vec<String> = self
+            .experiments
+            .iter()
+            .filter_map(|e| e.get("id").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        let mut sent = Vec::new();
+        for id in ids {
+            if !self.social.needs_share(&id, &me, now) {
+                continue;
+            }
+            let card = match self.social.compose_profile(&id, &me, now) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("collect_core: cannot compose profile for {id}: {e}");
+                    continue;
+                }
+            };
+            match self.announce(&id, &card, schema::Kind::ProfileAnnouncement) {
+                Ok(_) => {
+                    self.social.mark_shared(&id, &me, now);
+                    sent.push(id);
+                }
+                // Tried again on the next drain. RLN not being ready is the
+                // usual reason and is reported by `delivery.status`.
+                Err(e) => eprintln!("collect_core: profile for {id} not sent: {e}"),
+            }
+        }
+        sent
+    }
+
     pub fn announce_submission(&mut self, raw: &str, now: DateTime<Utc>) -> String {
         let request: Value = match serde_json::from_str(raw) {
             Ok(v) => v,
@@ -1179,10 +1762,14 @@ impl Session {
             }
             results.push(outcome["data"].clone());
         }
+        let shared = self.share_profiles(now);
+        let thumbnails = self.fetch_thumbnails();
         api::envelope_ok(json!({
             "received": results.len(),
             "handled": handled,
             "results": results,
+            "profiles_shared": shared,
+            "thumbnails_fetched": thumbnails,
         }))
     }
 
@@ -1257,6 +1844,8 @@ impl Session {
             Some("head") => schema::Kind::HeadAnnouncement,
             Some("submission") => schema::Kind::SubmissionAnnouncement,
             Some("receipt") => schema::Kind::ReceiptAnnouncement,
+            Some("message") => schema::Kind::MessageAnnouncement,
+            Some("profile") => schema::Kind::ProfileAnnouncement,
             other => {
                 return api::envelope_ok(json!({
                     "handled": false,
@@ -1283,6 +1872,28 @@ impl Session {
 
         let _ = source;
         match kind {
+            schema::Kind::MessageAnnouncement => {
+                let me = self.creator_key.clone();
+                match self.social.receive_message(&from_topic, &announcement, &me, now) {
+                    Received::Kept(m) => api::envelope_ok(json!({
+                        "handled": true, "kind": "message", "experiment": from_topic, "message": m,
+                    })),
+                    _ => api::envelope_ok(json!({ "handled": false, "reason": "duplicate", "detail": "message already kept" })),
+                }
+            }
+            schema::Kind::ProfileAnnouncement => {
+                let me = self.creator_key.clone();
+                match self.social.receive_profile(&from_topic, &announcement, &me, now) {
+                    Received::Kept(p) => api::envelope_ok(json!({
+                        "handled": true, "kind": "profile", "experiment": from_topic, "from": p["from"],
+                    })),
+                    Received::NothingForUs => api::envelope_ok(json!({
+                        "handled": true, "kind": "profile", "experiment": from_topic, "shared": false,
+                    })),
+                    Received::Duplicate => api::envelope_ok(json!({ "handled": false, "reason": "ours", "detail": "our own profile echoed back" })),
+                    Received::Refused(why) => api::envelope_ok(json!({ "handled": false, "reason": "unsealable", "detail": why })),
+                }
+            }
             schema::Kind::SubmissionAnnouncement => self.receive_submission(&from_topic, &announcement, now),
             schema::Kind::ReceiptAnnouncement => {
                 let cid = announcement.get("cid").and_then(Value::as_str).unwrap_or("").to_string();
@@ -2260,6 +2871,55 @@ impl Session {
 /// Comfortably inside the twenty-second protocol default, so the UI always
 /// gets an answer: a partial publish it can retry beats a reply that never
 /// comes.
+/// Where thumbnail images are cached, under the state directory, by sha256.
+const THUMB_DIR: &str = "thumbnails";
+
+/// The largest thumbnail this node will show. Ours are about 60 KB; this is
+/// room for someone else's encoder, not an invitation.
+const THUMB_MAX_BYTES: usize = 1024 * 1024;
+
+/// How many missing thumbnails one drain may go looking for on the network.
+const THUMB_FETCHES_PER_DRAIN: usize = 2;
+
+/// Do these bytes match the manifest's media entry? The signed manifest names
+/// a hash and a type; anything else at that CID is not shown.
+fn thumbnail_matches(entry: &Value, bytes: &[u8]) -> bool {
+    use sha2::{Digest, Sha256};
+    let sha = entry.get("sha256").and_then(Value::as_str).unwrap_or("");
+    let mime = entry.get("mime").and_then(Value::as_str).unwrap_or("");
+    bytes.len() <= THUMB_MAX_BYTES
+        && hex::encode(Sha256::digest(bytes)) == sha
+        && crate::media::Format::sniff(bytes).map(|f| f.mime()) == Some(mime)
+}
+
+/// A file path from what the UI sends: a plain path, or a `file://` URL as a
+/// file dialog returns it, percent-encoded — so a photo under "Application
+/// Support" arrives as `Application%20Support`.
+fn local_path(raw: &str) -> String {
+    let Some(rest) = raw.strip_prefix("file://") else {
+        return raw.to_string();
+    };
+    let bytes = rest.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(b) = u8::from_str_radix(&rest[i + 1..i + 3], 16) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| rest.to_string())
+}
+
+/// Experiments, forms, submissions and index pages this node holds, in the
+/// host's per-instance directory (SPEC Q8).
+const STATE_FILE: &str = "state.json";
+
 const PUBLISH_BUDGET: std::time::Duration = std::time::Duration::from_secs(14);
 
 /// How much export text travels back to the UI for preview. Above this the
@@ -2466,10 +3126,14 @@ mod tests {
             publications: BTreeMap::new(),
             publish_until: None,
             state_dir: None,
+            saved_state: None,
+            thumbs: Default::default(),
+            thumbs_tried: Default::default(),
             courier: None,
             seen: delivery::Seen::default(),
             receipts: BTreeMap::new(),
             heads: BTreeMap::new(),
+            social: Social::default(),
         };
         let public = session
             .attach_identity(scratch.0.to_str().unwrap())
@@ -2525,6 +3189,232 @@ mod tests {
         assert_eq!(made["publish_error"], Value::Null);
         assert!(made["note"].as_str().unwrap().contains("no Logos Storage"));
         assert!(!s.can_publish());
+    }
+
+    /// A photo on disk, as the file dialog would leave it, under a directory
+    /// with a space in it so the URL form is percent-encoded.
+    fn photo_on_disk(scratch: &Scratch) -> (std::path::PathBuf, String) {
+        let dir = scratch.0.join("My Photos");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cover.jpg");
+        std::fs::write(&path, crate::media::tests_support::gps_jpeg_upright()).unwrap();
+        let url = format!("file://{}", path.display()).replace(' ', "%20");
+        (path, url)
+    }
+
+    fn made(s: &mut Session) -> String {
+        let made = data(&s.create(
+            &create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
+            at("2026-10-28T08:00:00Z"),
+        ));
+        made["experiment"]["id"].as_str().or(made["id"].as_str()).unwrap().to_string()
+    }
+
+    #[test]
+    fn a_thumbnail_goes_to_storage_and_into_a_new_signed_manifest() {
+        let scratch = Scratch::new("thumb");
+        let mut s = publishing_in(&scratch);
+        let id = made(&mut s);
+        let (_, url) = photo_on_disk(&scratch);
+
+        let out = data(&s.set_thumbnail(&json!({ "experimentId": id, "path": url }).to_string()));
+        let manifest = &out["experiment"];
+        assert_eq!(manifest["version"], json!(2), "{out}");
+        assert!(crate::sign::verify(manifest).is_ok());
+        assert!(schema::errors_as(manifest, schema::Kind::Experiment).is_empty());
+        let entry = &manifest["thumbnail"];
+        assert_eq!(entry["mime"], json!("image/jpeg"));
+        assert_eq!(entry["width"], json!(crate::media::THUMB_WIDTH));
+
+        // What Storage holds is the cleaned thumbnail the entry describes.
+        let store = s.store.as_deref().unwrap();
+        let held = store.get(store::bare_cid(entry["cid"].as_str().unwrap()), true).unwrap();
+        assert!(thumbnail_matches(entry, &held));
+        assert_eq!(crate::media::remaining_metadata(&held), None, "GPS went to Storage");
+
+        // And both screens get something to show.
+        let uri = out["thumbnail"].as_str().expect("the detail page gets an image");
+        assert!(uri.starts_with("data:image/jpeg;base64,"));
+        let card = &data(&s.list(at("2026-10-28T08:00:00Z")))["experiments"][0];
+        assert_eq!(card["thumbnail"], json!(uri));
+    }
+
+    #[test]
+    fn a_thumbnail_is_refused_without_storage_and_nothing_changes() {
+        let scratch = Scratch::new("thumb-nostore");
+        let mut s = empty_in(&scratch);
+        let id = made(&mut s);
+        let (path, _) = photo_on_disk(&scratch);
+        let out = envelope(&s.set_thumbnail(
+            &json!({ "experimentId": id, "path": path.to_str().unwrap() }).to_string(),
+        ));
+        assert_eq!(out["ok"], json!(false));
+        assert_eq!(out["error"]["code"], json!(api::code::NOT_WIRED));
+        let manifest = &data(&s.get(&json!({ "experimentId": id }).to_string()))["experiment"];
+        assert_eq!(manifest["version"], json!(1));
+        assert!(manifest.get("thumbnail").is_none());
+    }
+
+    #[test]
+    fn only_the_creator_can_set_a_thumbnail() {
+        let scratch = Scratch::new("thumb-other");
+        let mut s = publishing_in(&scratch);
+        let id = made(&mut s);
+        s.creator_key = "3a".repeat(32);
+        let (path, _) = photo_on_disk(&scratch);
+        let out = envelope(&s.set_thumbnail(
+            &json!({ "experimentId": id, "path": path.to_str().unwrap() }).to_string(),
+        ));
+        assert_eq!(out["error"]["code"], json!(api::code::REJECTED), "{out}");
+    }
+
+    #[test]
+    fn clearing_a_thumbnail_makes_a_version_without_one() {
+        let scratch = Scratch::new("thumb-clear");
+        let mut s = publishing_in(&scratch);
+        let id = made(&mut s);
+        let (path, _) = photo_on_disk(&scratch);
+        s.set_thumbnail(&json!({ "experimentId": id, "path": path.to_str().unwrap() }).to_string());
+        let out = data(&s.clear_thumbnail(&json!({ "experimentId": id }).to_string()));
+        assert_eq!(out["experiment"]["version"], json!(3));
+        assert!(out["experiment"].get("thumbnail").is_none());
+        assert_eq!(out["thumbnail"], Value::Null);
+        // Clearing again changes nothing.
+        let again = data(&s.clear_thumbnail(&json!({ "experimentId": id }).to_string()));
+        assert_eq!(again["experiment"]["version"], json!(3));
+    }
+
+    #[test]
+    fn a_thumbnail_that_does_not_match_its_manifest_is_not_shown() {
+        let scratch = Scratch::new("thumb-tamper");
+        let mut s = publishing_in(&scratch);
+        let id = made(&mut s);
+        let (path, _) = photo_on_disk(&scratch);
+        let out = data(&s.set_thumbnail(
+            &json!({ "experimentId": id, "path": path.to_str().unwrap() }).to_string(),
+        ));
+        let sha = out["experiment"]["thumbnail"]["sha256"].as_str().unwrap().to_string();
+        // Swap the cached bytes for something else, and forget the memo.
+        std::fs::write(scratch.0.join(THUMB_DIR).join(format!("{sha}.img")), b"\xFF\xD8 not it").unwrap();
+        s.thumbs.borrow_mut().clear();
+        let card = &data(&s.list(at("2026-10-28T08:00:00Z")))["experiments"][0];
+        assert_eq!(card["thumbnail"], Value::Null);
+    }
+
+    #[test]
+    fn file_urls_are_decoded_to_paths() {
+        assert_eq!(local_path("/a/b.jpg"), "/a/b.jpg");
+        assert_eq!(
+            local_path("file:///Users/m/Library/Application%20Support/x.jpg"),
+            "/Users/m/Library/Application Support/x.jpg"
+        );
+        assert_eq!(local_path("file:///tmp/%E0%A4%95.jpg"), "/tmp/\u{915}.jpg");
+        assert_eq!(local_path("file:///tmp/50%.jpg"), "/tmp/50%.jpg");
+    }
+
+    #[test]
+    fn connection_reads_green_amber_or_red() {
+        let scratch = Scratch::new("connection");
+        let mut s = empty_in(&scratch);
+        assert_eq!(s.connection()["level"], json!("offline"), "nothing attached");
+
+        s.attach_store(Box::new(crate::store::MemoryStore::new()));
+        assert_eq!(s.connection()["level"], json!("degraded"), "storage without delivery");
+
+        for (reported, expected) in [
+            (Some("Connected"), "online"),
+            (Some("PartiallyConnected"), "degraded"),
+            (Some("Disconnected"), "offline"),
+            (None, "degraded"),
+        ] {
+            s.attach_courier(Box::new(delivery::MemoryCourier::connected(reported)));
+            let c = s.connection();
+            assert_eq!(c["level"], json!(expected), "{reported:?}: {c}");
+            assert!(!c["reason"].as_str().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn connected_without_rln_is_amber_not_green() {
+        let scratch = Scratch::new("connection-rln");
+        let mut s = publishing_in(&scratch);
+        s.attach_courier(Box::new(delivery::MemoryCourier::without_rln()));
+        let c = s.connection();
+        assert_eq!(c["level"], json!("degraded"), "{c}");
+        assert!(c["reason"].as_str().unwrap().contains("RLN"), "{c}");
+    }
+
+    #[test]
+    fn experiments_survive_a_relaunch() {
+        // The bug that emptied the dashboard after every update: experiments
+        // lived only in memory.
+        let scratch = Scratch::new("relaunch");
+        let mut s = publishing_in(&scratch);
+        let made = data(&s.create(
+            &create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
+            at("2026-10-28T08:00:00Z"),
+        ));
+        let id = made["experiment"]["id"].as_str().or(made["id"].as_str()).unwrap().to_string();
+        let cid = made["cid"].as_str().unwrap().to_string();
+        s.save_state();
+        drop(s);
+
+        let again = empty_in(&scratch);
+        let cards = data(&again.list(at("2026-10-28T08:00:00Z")))["experiments"].clone();
+        assert_eq!(cards.as_array().unwrap().len(), 1, "{cards}");
+        assert_eq!(cards[0]["id"], json!(id));
+        assert_eq!(cards[0]["cid"], json!(cid), "the published address was forgotten");
+    }
+
+    #[test]
+    fn an_unchanged_session_does_not_rewrite_the_state_file() {
+        let scratch = Scratch::new("unchanged");
+        let mut s = empty_in(&scratch);
+        s.create(
+            &create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
+            at("2026-10-28T08:00:00Z"),
+        );
+        s.save_state();
+        let path = scratch.0.join(STATE_FILE);
+        std::fs::write(&path, b"{\"marker\": true}").unwrap();
+        s.save_state();
+        assert_eq!(std::fs::read(&path).unwrap(), b"{\"marker\": true}");
+    }
+
+    #[test]
+    fn a_saved_document_that_fails_the_schema_is_dropped_not_shown() {
+        let scratch = Scratch::new("badstate");
+        let mut s = empty_in(&scratch);
+        s.create(
+            &create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
+            at("2026-10-28T08:00:00Z"),
+        );
+        s.save_state();
+        let path = scratch.0.join(STATE_FILE);
+        let mut state: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let good = state["experiments"][0].clone();
+        state["experiments"] = json!([good, { "kind": "experiment", "title": 7 }]);
+        std::fs::write(&path, state.to_string()).unwrap();
+
+        let again = empty_in(&scratch);
+        let cards = data(&again.list(at("2026-10-28T08:00:00Z")))["experiments"].clone();
+        assert_eq!(cards.as_array().unwrap().len(), 1, "{cards}");
+    }
+
+    #[test]
+    fn an_unreadable_state_file_is_moved_aside_not_overwritten() {
+        let scratch = Scratch::new("garbled");
+        std::fs::write(scratch.0.join(STATE_FILE), b"not json").unwrap();
+        let mut s = empty_in(&scratch);
+        assert!(s.experiments.is_empty());
+        let aside = scratch.0.join(format!("{STATE_FILE}.unreadable"));
+        assert_eq!(std::fs::read(&aside).unwrap(), b"not json");
+        s.create(
+            &create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
+            at("2026-10-28T08:00:00Z"),
+        );
+        s.save_state();
+        assert_eq!(std::fs::read(&aside).unwrap(), b"not json", "the old file was clobbered");
     }
 
     #[test]
@@ -4246,10 +5136,14 @@ mod tests {
             publications: BTreeMap::new(),
             publish_until: None,
             state_dir: None,
+            saved_state: None,
+            thumbs: Default::default(),
+            thumbs_tried: Default::default(),
             courier: None,
             seen: delivery::Seen::default(),
             receipts: BTreeMap::new(),
             heads: BTreeMap::new(),
+            social: Social::default(),
         };
         let out = envelope(&s.create(
             &create_request("2026-10-20T00:00:00Z", "2026-11-20T00:00:00Z"),
@@ -4273,10 +5167,14 @@ mod tests {
             publications: BTreeMap::new(),
             publish_until: None,
             state_dir: None,
+            saved_state: None,
+            thumbs: Default::default(),
+            thumbs_tried: Default::default(),
             courier: None,
             seen: delivery::Seen::default(),
             receipts: BTreeMap::new(),
             heads: BTreeMap::new(),
+            social: Social::default(),
         }
     }
 
@@ -4387,10 +5285,14 @@ mod tests {
             publications: BTreeMap::new(),
             publish_until: None,
             state_dir: None,
+            saved_state: None,
+            thumbs: Default::default(),
+            thumbs_tried: Default::default(),
             courier: None,
             seen: delivery::Seen::default(),
             receipts: BTreeMap::new(),
             heads: BTreeMap::new(),
+            social: Social::default(),
         };
         let out = data(&s.list(at("2026-10-28T08:00:00Z")));
         let cards = out["experiments"].as_array().unwrap();
@@ -4400,4 +5302,172 @@ mod tests {
         assert_eq!(cards[0]["protocol_count"], json!(3));
         assert_eq!(cards[0]["open_protocol_count"], json!(2));
     }
+
+    // ------------------------------------------- profile and discussion tests
+
+    /// Another project member: an identity and a `Social` of their own.
+    struct Member {
+        dir: Scratch,
+        social: crate::social::Social,
+    }
+
+    impl Member {
+        fn new(name: &str) -> Self {
+            let dir = Scratch::new(name);
+            let mut social = crate::social::Social::default();
+            Identity::load_or_create(dir.0.as_path()).expect("identity");
+            social.attach(dir.0.as_path()).expect("social");
+            Member { dir, social }
+        }
+        fn key(&self) -> String {
+            Identity::load_or_create(self.dir.0.as_path()).unwrap().public_hex()
+        }
+        fn say(&self, experiment: &str, text: &str, now: DateTime<Utc>) -> Value {
+            let m = self.social.compose(experiment, &self.key(), text, None, now).unwrap();
+            signed_by(&self.dir, m)
+        }
+    }
+
+    #[test]
+    fn a_sent_message_goes_out_signed_on_the_topic_and_never_to_storage() {
+        let scratch = Scratch::new("msgsend");
+        let (mut s, id, store, courier) = creator_with_delivery(&scratch);
+        let stored_before = store.len();
+        let out = data(&s.messages_send(
+            &json!({ "experimentId": id, "text": "  Welcome, everyone  " }).to_string(),
+            at("2026-10-28T09:00:00Z"),
+        ));
+        assert_eq!(out["sent"], json!(true));
+        let sent: Vec<Value> = courier.messages().into_iter().filter(|m| m["kind"] == json!("message")).collect();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["text"], json!("Welcome, everyone"));
+        crate::sign::verify(&sent[0]).expect("signed");
+        assert_eq!(schema::errors_as(&sent[0], schema::Kind::MessageAnnouncement), Vec::<String>::new());
+        assert_eq!(store.len(), stored_before, "a message was written to Logos Storage");
+        let list = data(&s.messages_list(&json!({ "experimentId": id }).to_string()));
+        assert_eq!(list["messages"][0]["mine"], json!(true));
+        assert_eq!(list["messages"][0]["creator"], json!(true));
+    }
+
+    #[test]
+    fn a_message_that_cannot_go_out_is_not_kept() {
+        let scratch = Scratch::new("msgrln");
+        let (mut s, id, _store, _courier) = creator_with_delivery(&scratch);
+        s.attach_courier(Box::new(crate::delivery::MemoryCourier::without_rln()));
+        let e = envelope(&s.messages_send(
+            &json!({ "experimentId": id, "text": "hello" }).to_string(),
+            at("2026-10-28T09:00:00Z"),
+        ));
+        assert_eq!(e["error"]["code"], json!("rln_not_ready"));
+        let list = data(&s.messages_list(&json!({ "experimentId": id }).to_string()));
+        assert_eq!(list["messages"], json!([]), "an unsent message was listed");
+    }
+
+    #[test]
+    fn a_message_for_an_experiment_this_node_does_not_hold_is_refused() {
+        let scratch = Scratch::new("msgunknown");
+        let (mut s, _id, _store, _courier) = creator_with_delivery(&scratch);
+        let e = envelope(&s.messages_send(
+            &json!({ "experimentId": "zzzzzzzzzzzzzzzz", "text": "hello" }).to_string(),
+            at("2026-10-28T09:00:00Z"),
+        ));
+        assert_eq!(e["ok"], json!(false));
+    }
+
+    #[test]
+    fn a_members_message_arrives_once_through_the_receive_path() {
+        let scratch = Scratch::new("msgrecv");
+        let (mut s, id, _store, _courier) = creator_with_delivery(&scratch);
+        let bob = Member::new("msgrecvbob");
+        let m = bob.say(&id, "Two kites at the north gate", at("2026-10-28T09:00:00Z"));
+        let first = data(&s.deliver(&arriving(&id, &m, "0xm1"), at("2026-10-28T09:00:01Z")));
+        assert_eq!(first["handled"], json!(true), "{first}");
+        assert_eq!(first["kind"], json!("message"));
+        // Same message replayed under a different hash (Store catch-up after
+        // a restart re-wraps it): still kept once.
+        let again = data(&s.deliver(&arriving(&id, &m, "0xm2"), at("2026-10-28T09:00:02Z")));
+        assert_eq!(again["handled"], json!(false));
+        let list = data(&s.messages_list(&json!({ "experimentId": id }).to_string()));
+        assert_eq!(list["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(list["messages"][0]["mine"], json!(false));
+        assert_eq!(list["messages"][0]["creator"], json!(false));
+    }
+
+    #[test]
+    fn a_forged_message_is_refused() {
+        let scratch = Scratch::new("msgforged");
+        let (mut s, id, _store, _courier) = creator_with_delivery(&scratch);
+        let bob = Member::new("msgforgedbob");
+        let mut m = bob.say(&id, "original", at("2026-10-28T09:00:00Z"));
+        m["text"] = json!("altered after signing");
+        let out = data(&s.deliver(&arriving(&id, &m, "0xf1"), at("2026-10-28T09:00:01Z")));
+        assert_eq!(out["reason"], json!("bad_signature"));
+    }
+
+    #[test]
+    fn draining_introduces_us_and_seals_shared_fields_for_members() {
+        let scratch = Scratch::new("share");
+        let (mut s, id, store, courier) = creator_with_delivery(&scratch);
+        data(&s.profile_save(&json!({ "fields": {
+            "alias": { "value": "Mahboob", "share": true },
+            "phone": { "value": "+91 98450 12345", "share": true },
+            "email": { "value": "m@example.org", "share": false },
+        }}).to_string()));
+        let mut bob = Member::new("sharebob");
+        let hello = bob.say(&id, "hi", at("2026-10-28T09:00:00Z"));
+        courier.arrive(&crate::delivery::topic(&id), "0xh1", &hello);
+        let stored_before = store.len();
+        let out = data(&s.drain(at("2026-10-28T09:00:05Z")));
+        assert_eq!(out["profiles_shared"], json!([id.clone()]), "{out}");
+        assert_eq!(store.len(), stored_before, "a profile was written to Logos Storage");
+
+        let card = courier.messages().into_iter().find(|m| m["kind"] == json!("profile")).expect("a profile went out");
+        let wire = card.to_string();
+        assert!(!wire.contains("98450") && !wire.contains("m@example.org") && !wire.contains("Mahboob"),
+                "a profile field went out in the clear: {wire}");
+        crate::sign::verify(&card).expect("signed");
+        let bob_key = bob.key();
+        match bob.social.receive_profile(&id, &card, &bob_key, at("2026-10-28T09:00:06Z")) {
+            crate::social::Received::Kept(v) => {
+                assert_eq!(v["profile"], json!({ "alias": "Mahboob", "phone": "+91 98450 12345" }));
+            }
+            other => panic!("bob could not open the profile: {other:?}"),
+        }
+        // Nothing changed: the next drain sends nothing.
+        let quiet = data(&s.drain(at("2026-10-28T09:00:10Z")));
+        assert_eq!(quiet["profiles_shared"], json!([]));
+    }
+
+    #[test]
+    fn a_profile_with_bad_fields_reports_each_one() {
+        let scratch = Scratch::new("profbad");
+        let mut s = publishing_in(&scratch);
+        let e = envelope(&s.profile_save(&json!({ "fields": {
+            "age": { "value": "old", "share": false },
+            "email": { "value": "x", "share": false },
+        }}).to_string()));
+        assert_eq!(e["error"]["code"], json!("invalid_values"));
+        assert!(e["error"]["problems"]["age"].is_string());
+        assert!(e["error"]["problems"]["email"].is_string());
+    }
+
+    #[test]
+    fn the_profile_survives_a_restart() {
+        let scratch = Scratch::new("profkeep");
+        let mut s = publishing_in(&scratch);
+        data(&s.profile_save(&json!({ "fields": { "location": { "value": "Bengaluru", "share": true } } }).to_string()));
+        let mut again = Session::new();
+        again.attach_identity(scratch.0.to_str().unwrap()).unwrap();
+        let p = data(&again.profile_get());
+        assert_eq!(p["fields"]["location"], json!({ "value": "Bengaluru", "share": true }));
+    }
+
+    #[test]
+    fn a_missing_photo_file_is_reported() {
+        let scratch = Scratch::new("profphoto");
+        let mut s = publishing_in(&scratch);
+        let e = envelope(&s.profile_set_photo(&json!({ "path": "file:///no/such/photo.jpg" }).to_string()));
+        assert_eq!(e["error"]["code"], json!("media"));
+    }
 }
+
