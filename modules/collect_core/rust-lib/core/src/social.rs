@@ -139,6 +139,19 @@ impl Social {
     }
 
     /// `profile.save`. All-or-nothing; problems come back keyed by field.
+    /// This person's own wallet address, as saved in their profile, whether
+    /// or not it is shared with members. Read here, never taken from the
+    /// UI, so a submission can only ever carry the address the person saved.
+    pub fn own_wallet(&self) -> Option<String> {
+        self.profile
+            .as_json()
+            .pointer("/wallet/value")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
+            .map(str::to_string)
+    }
+
     pub fn save_profile(&mut self, request: &Value) -> Result<Value, Value> {
         self.profile
             .update(request)

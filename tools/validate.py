@@ -15,7 +15,7 @@ def load(name):
 
 THUMB = {"cid": "logos:zDvZThumb", "sha256": "ab" * 32, "mime": "image/jpeg", "bytes": 48213, "width": 960, "height": 540}
 
-docs = [load("experiment.json"), dict(load("experiment.json"), thumbnail=THUMB), load("protocol.json"), load("submission.json"), load("index.json")] + load("announcements.json")
+docs = [load("experiment.json"), dict(load("experiment.json"), thumbnail=THUMB), dict(load("submission.json"), wallet="lez1qexamplewalletaddress"), load("protocol.json"), load("submission.json"), load("index.json")] + load("announcements.json")
 fail = 0
 for d in docs:
     label = d.get("schema") or ("announcement:" + d.get("kind", "?"))
@@ -50,6 +50,8 @@ neg = [
     ("thumbnail without a sha256", mutate(load("experiment.json"), lambda d: d.__setitem__("thumbnail", {k: v for k, v in THUMB.items() if k != "sha256"}))),
     ("thumbnail as a bare URL", mutate(load("experiment.json"), lambda d: d.__setitem__("thumbnail", "https://example.org/a.jpg"))),
     ("thumbnail as a GIF", mutate(load("experiment.json"), lambda d: d.__setitem__("thumbnail", dict(THUMB, mime="image/gif")))),
+    ("wallet with a space in it", mutate(load("submission.json"), lambda d: d.__setitem__("wallet", "two words"))),
+    ("empty wallet", mutate(load("submission.json"), lambda d: d.__setitem__("wallet", ""))),
     ("sealed entry with a short nonce", mutate(load("announcements.json")[4], lambda d: d["sealed"][0].__setitem__("nonce", "00"))),
 ]
 for label, d in neg:

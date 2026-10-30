@@ -41,6 +41,8 @@ Item {
     // collect_core answers, which is also the truth before then.
     property var connection: ({ level: "offline", reason: "Connecting to collect_core\u2026" })
     property bool refreshing: false
+    // The last send failure put in the banner, so a repeat is not.
+    property string lastSendFailure: ""
     property var createProblems: ({})
     property var builderProblems: ({})
     /// The protocol being edited, or null when adding a new one.
@@ -85,6 +87,8 @@ Item {
     // The profile's share switch at the moment a photo was asked for, since
     // the answer arrives later through a signal.
     property bool pickShare: false
+    // The photo field waiting for the chooser: {maxMb, room, onEach, onPending}.
+    property var formPhotoRequest: null
 
     anchors.fill: parent
 
@@ -98,6 +102,20 @@ Item {
         anchors.fill: parent
     }
 
+    // Only where the backend has no native chooser (not macOS).
+    Loader {
+        id: formPhotoPicker
+        active: !app.nativePicker
+        source: "components/PhotoPicker.qml"
+        onLoaded: item.title = "Choose a photo"
+    }
+
+    Connections {
+        target: formPhotoPicker.item
+        ignoreUnknownSignals: true
+        function onPicked(url) { app.addFormPhotos([url]); }
+    }
+
     // `documents` is a .rep PROP carrying experiments.list, so this fires
     // whenever the backend pushes a new list.
     Connections {
@@ -106,14 +124,23 @@ Item {
         function onDocumentsChanged() {
             app.ingestList();
         }
-        // The native chooser's answer; an empty path is a cancel.
+        // The native chooser's answer: one path per line, none on a cancel.
         function onImagePicked(purpose, path) {
-            if (path === "")
+            var paths = path.split("\n").map(function (p) { return p.trim(); })
+                            .filter(function (p) { return p !== ""; });
+            if (purpose === "formPhotos") {
+                if (paths.length === 0)
+                    app.formPhotoRequest = null;
+                else
+                    app.addFormPhotos(paths);
+                return;
+            }
+            if (paths.length === 0)
                 return;
             if (purpose === "thumbnail")
-                app.setThumbnail(path);
+                app.setThumbnail(paths[0]);
             else if (purpose === "profile")
-                app.setProfilePhoto(path, app.pickShare);
+                app.setProfilePhoto(paths[0], app.pickShare);
         }
     }
 
@@ -123,10 +150,49 @@ Item {
             app.call("submissions.submit", {
                 experimentId: draft.experiment,
                 protocolId: draft.protocol.id,
-                values: draft.values
+                values: draft.values,
+                includeWallet: draft.includeWallet === true
             }, onData);
         };
+        Core.photoAdder = function (maxMb, room, onEach, onPending) {
+            app.formPhotoRequest = { maxMb: maxMb, room: room, onEach: onEach, onPending: onPending };
+            if (app.nativePicker)
+                app.backend.pickImage("formPhotos", "Choose photos");
+            else if (formPhotoPicker.item)
+                formPhotoPicker.item.open();
+            else
+                Core.reportFailure("This copy of Basecamp offers no way to choose a file here.");
+        };
         app.ingestList();
+    }
+
+    /// Clean and store each picked photo, one call each, and hand every one
+    /// that made it to the field that asked. A photo that fails says why in
+    /// the banner without losing the others.
+    function addFormPhotos(paths) {
+        var req = app.formPhotoRequest;
+        app.formPhotoRequest = null;
+        if (!req)
+            return;
+        var wanted = paths.slice(0, Math.max(0, req.room));
+        if (paths.length > wanted.length)
+            Core.reportFailure("Only " + wanted.length + " more photo" + (wanted.length === 1 ? "" : "s")
+                               + " fit in this field; the rest were left out.");
+        var pending = wanted.length;
+        req.onPending(pending);
+        wanted.forEach(function (path) {
+            app.callEnvelope("media.addPhoto", { path: path, maxMbEach: req.maxMb }, function (e) {
+                pending -= 1;
+                req.onPending(pending);
+                if (e.ok) {
+                    req.onEach(e.data);
+                    return;
+                }
+                var name = path.split("/").pop();
+                Core.reportFailure(name + " was not added: "
+                                   + (e.error && e.error.message ? e.error.message : "it could not be processed"));
+            });
+        });
     }
 
     function ingestList() {
@@ -681,6 +747,8 @@ Item {
         Form {
             experiment: Core.experimentDoc
             protocol: app.activeProtocol
+            wallet: app.profileData && app.profileData.fields && app.profileData.fields.wallet
+                    && app.profileData.fields.wallet.value ? app.profileData.fields.wallet.value : ""
             accepting: Core.withinWindow(Core.experimentDoc, app.nowMs)
             onSubmitted: function (cid) {
                 app.lastCid = cid;
@@ -873,9 +941,16 @@ Item {
                     app.receiptSeen = true;
                 // A send that the network refused is about something the
                 // person did, so it goes to the banner — unlike the rest of
-                // this timer's work.
-                if (r.reason === "send_failed")
-                    Core.reportFailure("An announcement was refused by the network: " + r.detail);
+                // this timer's work. Once per kind of failure: the creator's
+                // head is re-sent every ten minutes, and the same banner
+                // each time says nothing new. The dot keeps the live state.
+                if (r.reason === "send_failed" && r.detail !== app.lastSendFailure) {
+                    app.lastSendFailure = r.detail;
+                    Core.reportFailure("Your data is saved on Logos Storage, but the network did not carry "
+                                       + "the announcement (" + r.detail + "). On the testnet this usually "
+                                       + "means this node has no RLN membership yet; register one in the "
+                                       + "RLN Membership app. Collect keeps trying.");
+                }
             }
             if (talk && app.page === "discussion")
                 app.loadDiscussion(null);

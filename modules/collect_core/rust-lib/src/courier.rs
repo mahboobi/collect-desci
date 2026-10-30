@@ -87,6 +87,9 @@ impl LogosDelivery {
             // and on a node whose RLN subsystem is Ready but whose
             // membership is not, every send does exactly that.
             ("messageError", Event::SendFailed),
+            // The other half: a send that got out. Without it a node that
+            // failed once would read as failing forever.
+            ("messageSent", Event::Sent),
         ] {
             let subscription = proxy
                 .on(name)
@@ -203,6 +206,7 @@ enum Event {
     Received,
     Started,
     SendFailed,
+    Sent,
 }
 
 /// Record one event.
@@ -251,6 +255,14 @@ fn record(state: &mut Inbox, kind: Event, data: &Value) {
                 "requestId": at(0).as_str().unwrap_or_default(),
                 "messageHash": at(1).as_str().unwrap_or_default(),
                 "error": at(2).as_str().unwrap_or("the network refused the message"),
+            }));
+        }
+        // messageSent(requestId, messageHash, timestamp)
+        Event::Sent => {
+            state.messages.push(json!({
+                "kind": "sent",
+                "requestId": at(0).as_str().unwrap_or_default(),
+                "messageHash": at(1).as_str().unwrap_or_default(),
             }));
         }
         // nodeStarted(success, message, timestamp)

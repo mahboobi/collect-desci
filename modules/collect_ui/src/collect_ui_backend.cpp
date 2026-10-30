@@ -136,14 +136,28 @@ void CollectUiBackend::pickImage(QString purpose, QString title)
                                                  {QStringLiteral("-b"), QStringLiteral("co.logos.LogosBasecamp")});
                          Q_EMIT imagePicked(purpose, path);
                      });
-    chooser->start(QStringLiteral("/usr/bin/osascript"),
-                   {QStringLiteral("-e"), QStringLiteral("on run argv"),
-                    QStringLiteral("-e"), QStringLiteral("activate"),
-                    QStringLiteral("-e"),
-                    QStringLiteral("return POSIX path of (choose file with prompt (item 1 of argv) "
-                                   "of type {\"public.image\"})"),
-                    QStringLiteral("-e"), QStringLiteral("end run"),
-                    title});
+    // A form's photo field takes several at once; everything else one. The
+    // answer is one POSIX path per line either way.
+    const bool many = purpose == QStringLiteral("formPhotos");
+    QStringList script{QStringLiteral("on run argv"), QStringLiteral("activate")};
+    if (many) {
+        script << QStringLiteral("set picked to choose file with prompt (item 1 of argv) "
+                                 "of type {\"public.image\"} with multiple selections allowed")
+               << QStringLiteral("set out to \"\"")
+               << QStringLiteral("repeat with f in picked")
+               << QStringLiteral("set out to out & POSIX path of f & linefeed")
+               << QStringLiteral("end repeat")
+               << QStringLiteral("return out");
+    } else {
+        script << QStringLiteral("return POSIX path of (choose file with prompt (item 1 of argv) "
+                                 "of type {\"public.image\"})");
+    }
+    script << QStringLiteral("end run");
+    QStringList args;
+    for (const QString &line : script)
+        args << QStringLiteral("-e") << line;
+    args << title;
+    chooser->start(QStringLiteral("/usr/bin/osascript"), args);
 #else
     Q_UNUSED(title);
     Q_EMIT imagePicked(purpose, QString());

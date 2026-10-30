@@ -56,10 +56,11 @@ impl Format {
 /// index later: the CID is what the creator signed for, and `submitted_at`
 /// versus `received_at` is the difference between when it was filled in and
 /// when it arrived.
-const PROVENANCE: [(&str, &str); 6] = [
+const PROVENANCE: [(&str, &str); 7] = [
     ("cid", "Document CID"),
     ("submitter", "Submitter key"),
     ("submitter_name", "Submitter name"),
+    ("submitter_wallet", "Submitter wallet"),
     ("version", "Form version"),
     ("submitted_at", "Submitted at"),
     ("received_at", "Received at"),
@@ -272,7 +273,7 @@ mod tests {
         let out = csv(&columns(), &[]);
         assert_eq!(
             lines(&out)[0],
-            "Document CID,Submitter key,Submitter name,Form version,Submitted at,Received at,How many,Species,Notes"
+            "Document CID,Submitter key,Submitter name,Submitter wallet,Form version,Submitted at,Received at,How many,Species,Notes"
         );
     }
 

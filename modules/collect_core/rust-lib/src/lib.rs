@@ -516,7 +516,7 @@ impl CollectCoreModule for Collect {
         let announcing = self.session().can_announce();
         let courier = self.session().courier_description();
         let rln = self.session().rln_status();
-        let connection = self.session().connection();
+        let connection = self.session().connection_logged();
         serde_json::json!({
             "ok": true,
             "data": {
@@ -562,6 +562,7 @@ impl CollectCoreModule for Collect {
             "experiments.update" => self.session().update(&request, now),
             "experiments.setThumbnail" => self.session().set_thumbnail(&request),
             "experiments.clearThumbnail" => self.session().clear_thumbnail(&request),
+            "media.addPhoto" => self.session().add_photo(&request),
             "submitters.hide" => self.session().set_hidden(&request, true, now),
             "submitters.show" => self.session().set_hidden(&request, false, now),
             "results.export" => self.session().export(&request, now),

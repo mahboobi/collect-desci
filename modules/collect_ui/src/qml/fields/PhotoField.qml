@@ -19,6 +19,8 @@ FieldBase {
 
     // Media entries as they will appear in the submission.
     property var items: []
+    // Photos picked but not yet back from collect_core.
+    property int adding: 0
 
     value: items.length === 0 ? undefined : items
     blank: items.length === 0
@@ -126,14 +128,28 @@ FieldBase {
 
         Button {
             id: addButton
+            objectName: "addPhotos"
             visible: root.items.length < root.maximum
             height: Theme.touchTarget
             width: parent.width
-            text: "+ Add photos"
+            text: root.adding > 0
+                  ? (root.adding === 1 ? "Cleaning and saving 1 photo\u2026"
+                                       : "Cleaning and saving " + root.adding + " photos\u2026")
+                  : "+ Add photos"
             Accessible.name: "Add photos to " + root.field.label
-            // Wiring this to a file dialog belongs with the live
-            // collect_core.submissions.addMedia job, not fixtures.
-            onClicked: root.requestAdd()
+            enabled: root.adding === 0
+            // Picking goes through Main (Core.photoAdder): the sandboxed view
+            // cannot open files, and collect_core does the cleaning and the
+            // upload. Each photo arrives already stripped and on Storage.
+            onClicked: {
+                if (!Core.photoAdder) {
+                    root.requestAdd();
+                    return;
+                }
+                Core.photoAdder(root.maxMbEach, root.maximum - root.items.length,
+                                function (r) { root.addProcessed(r.entry, r.exif, r.name); },
+                                function (pending) { root.adding = pending; });
+            }
 
             contentItem: Text {
                 text: addButton.text

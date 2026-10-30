@@ -25,7 +25,7 @@ Everything is a JSON document on **Logos Storage**, addressed by CID. Documents 
 | --- | --- | --- | --- |
 | `collect/experiment@1` | Creator | id, version, title, description, starts_at, ends_at, timezone, protocol list (id, version, CID, status), `prev` (previous manifest CID), optional `thumbnail` (a `media` entry: 960x540 JPEG cover on Storage, metadata removed; added 30 October 2026) | No. Each edit uploads a new version that points to the previous one. |
 | `collect/protocol@1` | Creator | id, version, name, instructions, fields, options | No. Edits create a new version; submissions name the version they used. |
-| `collect/submission@1` | Submitter | experiment, protocol id and version, submitter key and optional name, submitted_at, values; media as CIDs | No |
+| `collect/submission@1` | Submitter | experiment, protocol id and version, submitter key and optional name, submitted_at, values; media as CIDs; optional public `wallet` (the submitter's own profile address, only when they tick the box on the form; added 30 October 2026). `submissions.submit` takes `includeWallet: bool`; results rows and exports carry `submitter_wallet` | No |
 | `collect/index@1` | Creator | One page (up to 1,000 entries) listing received submissions, hidden keys, and `prev` page CID | No. New pages link back to earlier ones. |
 | Media files | Submitter | Photos, with all metadata removed | No |
 
@@ -124,7 +124,7 @@ methods beside it:
 | Identity | `identity.me` → `{key, signing}` |
 | Experiments | `experiments.list`, `experiments.get {experimentId}`, `experiments.create {title, description, startsAt, endsAt, timezone, creatorName}`, `experiments.update {experimentId, …}`, `experiments.publish {experimentId}` (retry an upload), `experiments.setThumbnail {experimentId, path}` (path or `file://` URL; needs Storage; makes a new version), `experiments.clearThumbnail {experimentId}`, `experiments.open {link}`, `experiments.parseLink`. `list` cards and `get` carry `thumbnail`: a data URI the UI can show, or null when there is none or this node does not hold it yet (the drain fetches missing ones, two per run, and checks each against the manifest's sha256) |
 | Protocols | `protocols.get`, `protocols.saveDraft`, `protocols.validateDraft` |
-| Submissions | `submissions.validate`, `submissions.prepareValues`, `submissions.processMedia` |
+| Submissions | `submissions.validate`, `submissions.prepareValues`, `submissions.processMedia`, `media.addPhoto {path, maxMbEach}` → `{entry, exif: {location, datetime}, name}` (cleans, puts the cleaned file on Storage, returns the media entry for a photo field; needs Storage) |
 | Index | `index.accept`, `index.page` |
 | Results | `results.list {experimentId, protocolId}`, `results.export {experimentId, protocolId, format, includeMedia}` → `{path, rows, bytes, media}` |
 | Moderation | `submitters.hide {experimentId, submitter}`, `submitters.show {…}` |

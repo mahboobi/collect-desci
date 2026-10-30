@@ -41,7 +41,8 @@ class CollectUi
 
     // Open the system's image chooser. Answers through imagePicked, with an
     // empty path when the person cancelled. `purpose` comes back unchanged so
-    // the view knows which screen asked.
+    // the view knows which screen asked; "formPhotos" allows several files,
+    // answered one path per line.
     SLOT(void pickImage(QString purpose, QString title))
     SIGNAL(imagePicked(QString purpose, QString path))
 }

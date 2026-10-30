@@ -23,6 +23,14 @@ Flickable {
     signal submitted(string cid)
     signal cancelled()
 
+    /// The wallet address saved in this person's profile, or "" for none.
+    /// Only shown, never sent: collect_core reads the address from the
+    /// profile itself when `includeWallet` is set.
+    property string wallet: ""
+    /// Off for every new form. A wallet in a submission is public forever,
+    /// so it is a choice made each time, not a setting.
+    property bool includeWallet: false
+
     readonly property alias complete: renderer.complete
 
     contentWidth: width
@@ -157,6 +165,18 @@ Flickable {
                 color: renderer.complete ? Theme.accent : Theme.ink2
             }
 
+            CheckRow {
+                id: walletRow
+                objectName: "includeWallet"
+                visible: screen.wallet !== ""
+                width: parent.width
+                label: "Include my wallet address with this submission"
+                hint: screen.wallet + " will be saved with your answers, publicly and permanently. "
+                      + "Anyone can see it, and it cannot be removed later."
+                on: screen.includeWallet
+                onToggled: function (on) { screen.includeWallet = on; }
+            }
+
             Text {
                 width: parent.width
                 wrapMode: Text.Wrap
@@ -238,7 +258,8 @@ Flickable {
                 id: screen.protocol.id,
                 version: screen.protocol.version
             },
-            values: renderer.values()
+            values: renderer.values(),
+            includeWallet: screen.includeWallet && screen.wallet !== ""
         };
         Core.submit(draft, function (result) {
             if (result.ok) {

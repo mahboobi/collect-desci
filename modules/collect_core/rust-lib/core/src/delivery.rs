@@ -374,6 +374,14 @@ impl MemoryCourier {
         }
     }
 
+    /// Put any inbox item in, as the real client's event threads do —
+    /// `sendFailed` and `sent` included.
+    pub fn push_raw(&self, item: Value) {
+        if let Ok(mut arrived) = self.arrived.lock() {
+            arrived.push(item);
+        }
+    }
+
     /// Put a message in the inbox, as Delivery would.
     pub fn arrive(&self, topic: &str, message_hash: &str, payload: &Value) {
         if let Ok(mut arrived) = self.arrived.lock() {

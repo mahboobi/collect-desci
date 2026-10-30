@@ -194,6 +194,13 @@ QtObject {
     /// of its own, so Main injects one.
     property var submitter: null
 
+    /// Where a photo field gets photos from: `photoAdder(maxMbEach, room,
+    /// onEach)` picks up to `room` files, has collect_core clean and store
+    /// each, and calls `onEach({entry, exif, name})` per photo that made it.
+    /// Set by Main for the same reason as `submitter`; null in tests and
+    /// fixtures, where the button says it cannot add photos here.
+    property var photoAdder: null
+
     function submit(draft, onDone) {
         if (!core.submitter) {
             onDone({ ok: false, error: { code: "not_wired", message: "collect_core is not reachable yet" } });

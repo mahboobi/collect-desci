@@ -121,6 +121,6 @@ is not copied. See `docs/api-verification.md` round 3.
   - Scaffold: https://docs.logos.co/build-an-app/scaffold/about-logos-scaffold
 - Do not add a blockchain, tokens or payments in v1. A wallet *address* in the profile is self-description, not a payment feature.
 - Encryption is for sealed profile fields only (`seal.rs`). Do not add another scheme, and do not encrypt documents.
-- Personal data lives only in the profile. It never goes into a document, never onto Logos Storage, and never onto Delivery in the clear: each field leaves the device only when its own `share` switch is on, sealed for each member separately. Submissions still carry only the optional public display name.
+- Personal data lives only in the profile. It never goes into a document, never onto Logos Storage, and never onto Delivery in the clear: each field leaves the device only when its own `share` switch is on, sealed for each member separately. Submissions still carry only the optional public display name and, when the submitter ticks the box on that form, their wallet address (decided 30 October 2026). The address is read from their own profile in `collect_core`, never taken from the UI, and the box starts unticked on every form.
 - Do not put anything in a `message` that is not the person's own typed text: messages are readable by anyone with the experiment's link.
 - Do not change pins or the document formats without asking.

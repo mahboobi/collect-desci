@@ -169,6 +169,7 @@
         "submitted_at": { "$ref": "#/$defs/ts" },
         "values": { "type": "object", "propertyNames": { "$ref": "#/$defs/fieldKey" }, "additionalProperties": { "$ref": "#/$defs/value" } },
         "app": { "type": "string", "maxLength": 40 },
+        "wallet": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "^\\S+$", "description": "Optional, public, opt-in: the submitter's wallet address, taken from their own profile only when they tick the box on the form" },
         "sig": { "$ref": "#/$defs/sig" }
       }
     },

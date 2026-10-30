@@ -126,6 +126,14 @@ pub struct Session {
     /// Thumbnails already looked for on the network this run, by sha256, so
     /// one that cannot be found is not asked for on every drain.
     thumbs_tried: std::collections::BTreeSet<String>,
+    /// Why the network last refused one of our messages, if nothing has got
+    /// out since. Delivery's `rlnState` says `Ready` once its RLN bridge
+    /// answers, which is not the same as holding a membership — and nothing
+    /// in its API reports the membership — so whether sends get through is
+    /// learned from how they end.
+    send_failure: Option<String>,
+    /// The connection level last reported, so a change is logged once.
+    last_level: std::cell::RefCell<String>,
 }
 
 impl Default for Session {
@@ -153,6 +161,8 @@ impl Session {
             saved_state: None,
             thumbs: Default::default(),
             thumbs_tried: Default::default(),
+            send_failure: None,
+            last_level: Default::default(),
             courier: None,
             seen: delivery::Seen::default(),
             receipts: BTreeMap::new(),
@@ -301,6 +311,8 @@ impl Session {
                 "cid": cid,
                 "submitter": submitter,
                 "submitter_name": submission.pointer("/submitter/name").and_then(Value::as_str).unwrap_or(""),
+                // Empty unless the submitter chose to include it.
+                "submitter_wallet": submission.get("wallet").and_then(Value::as_str).unwrap_or(""),
                 "version": submission.pointer("/protocol/version").and_then(Value::as_u64).unwrap_or(0),
                 "submitted_at": submitted_at,
                 // Empty when the index has no entry yet: received but not
@@ -923,6 +935,65 @@ impl Session {
         self.get(&json!({ "experimentId": id }).to_string())
     }
 
+    /// `media.addPhoto {path, maxMbEach}` — one photo for a form's photo field.
+    ///
+    /// SPEC section 5 steps 1 to 4: read the location and time, remove every
+    /// piece of metadata, put the cleaned file on Storage, and hand back the
+    /// media entry the submission will carry, plus what was read so the form
+    /// can prefill `location` and `datetime` where the protocol allows. The
+    /// original never leaves this function.
+    pub fn add_photo(&mut self, raw: &str) -> String {
+        let request: Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(e) => return api::envelope_err(api::code::BAD_REQUEST, format!("not JSON: {e}")),
+        };
+        let path = local_path(request.get("path").and_then(Value::as_str).unwrap_or(""));
+        if path.is_empty() {
+            return api::envelope_err(api::code::BAD_REQUEST, "`path` is required");
+        }
+        let max_mb = request
+            .get("maxMbEach")
+            .and_then(Value::as_f64)
+            .unwrap_or(fields::PHOTO_DEFAULT_MAX_MB);
+        let original = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => return api::envelope_err(api::code::MEDIA, format!("cannot read the photo: {e}")),
+        };
+        let cleaned = match crate::media::process(&original, max_mb) {
+            Ok(c) => c,
+            Err(e) => return api::envelope_err(api::code::MEDIA, e.to_string()),
+        };
+        let Some(store) = self.store.as_deref() else {
+            return api::envelope_err(
+                api::code::NOT_WIRED,
+                "Logos Storage is not reachable, and a photo has to be on Storage for the submission to name it",
+            );
+        };
+        let ext = match cleaned.mime {
+            "image/png" => "png",
+            "image/webp" => "webp",
+            _ => "jpg",
+        };
+        let cid = match store
+            .put(&format!("photo-{}.{ext}", &cleaned.sha256[..16]), &cleaned.bytes)
+            .and_then(|c| store::as_document_cid(&c))
+        {
+            Ok(cid) => cid,
+            Err(e) => return api::envelope_err(e.code(), format!("the photo was not stored: {e}")),
+        };
+        let (location, datetime) = crate::media::prefills(&cleaned.exif);
+        let name = Path::new(&path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        api::envelope_ok(json!({
+            "entry": cleaned.media_entry(&cid),
+            "exif": { "location": location, "datetime": datetime },
+            "name": name,
+            "reencoded": cleaned.reencoded,
+        }))
+    }
+
     /// `experiments.clearThumbnail {experimentId}` — back to no cover image.
     ///
     /// A new manifest version without the field. The image itself stays on
@@ -1334,10 +1405,36 @@ impl Session {
         if rln.required && !rln.ready {
             return level(
                 "degraded",
-                format!("Connected, but this node cannot send yet: RLN membership is {}.", rln.state),
+                format!("Connected, but this node cannot send yet: RLN is {}.", rln.state),
+            );
+        }
+        if let Some(why) = &self.send_failure {
+            return level(
+                "degraded",
+                format!(
+                    "Connected, but the network refused this node's last message ({why}). \
+                     On logos.test that almost always means no RLN membership is registered \
+                     yet: register one in the RLN Membership app."
+                ),
             );
         }
         level("online", "Connected to Logos Storage and Logos Delivery.".into())
+    }
+
+    /// `connection`, with a log line whenever the level changes — the dot on
+    /// screen is otherwise the only record of why it was red.
+    pub fn connection_logged(&self) -> Value {
+        let reading = self.connection();
+        let now = format!("{} ({})", reading["level"].as_str().unwrap_or("?"),
+                          reading["delivery"].as_str().unwrap_or("no reading"));
+        if *self.last_level.borrow() != now {
+            eprintln!(
+                "collect_core: connection {now}: {}",
+                reading["reason"].as_str().unwrap_or("")
+            );
+            *self.last_level.borrow_mut() = now;
+        }
+        reading
     }
 
     /// Subscribe to the topics of every experiment this node cares about.
@@ -1738,6 +1835,12 @@ impl Session {
             // A refused send is not a message to deliver; it is news about
             // one of ours. Reported through the same results so the UI has
             // one place to look.
+            if message.get("kind").and_then(Value::as_str) == Some("sent") {
+                if self.send_failure.take().is_some() {
+                    eprintln!("collect_core: messages are getting through again");
+                }
+                continue;
+            }
             if message.get("kind").and_then(Value::as_str) == Some("sendFailed") {
                 let detail = message
                     .get("error")
@@ -1745,6 +1848,7 @@ impl Session {
                     .unwrap_or("the network refused the message")
                     .to_string();
                 eprintln!("collect_core: announcement refused: {detail}");
+                self.send_failure = Some(detail.clone());
                 results.push(json!({
                     "handled": false,
                     "reason": "send_failed",
@@ -2282,7 +2386,30 @@ impl Session {
             }));
         }
 
-        let submission = json!({
+        // The wallet is public and permanent once submitted, so it goes in
+        // only when the person ticked the box for this submission, and only
+        // as the address their own profile holds.
+        let wallet = if request.get("includeWallet").and_then(Value::as_bool) == Some(true) {
+            match self.social.own_wallet() {
+                Some(w) if w.chars().any(char::is_whitespace) => {
+                    return api::envelope_err(
+                        api::code::BAD_REQUEST,
+                        "the wallet address in your profile has a space in it; correct it there first",
+                    )
+                }
+                Some(w) => Some(w),
+                None => {
+                    return api::envelope_err(
+                        api::code::BAD_REQUEST,
+                        "there is no wallet address in your profile to include",
+                    )
+                }
+            }
+        } else {
+            None
+        };
+
+        let mut submission = json!({
             "schema": "collect/submission@1",
             "id": uuid::Uuid::now_v7().to_string(),
             "experiment": experiment_id,
@@ -2298,6 +2425,9 @@ impl Session {
             "values": values,
             "sig": "00".repeat(64),
         });
+        if let Some(wallet) = wallet {
+            submission["wallet"] = json!(wallet);
+        }
 
         let submission = match self.signed(&submission) {
             Ok(signed) => signed,
@@ -3129,6 +3259,8 @@ mod tests {
             saved_state: None,
             thumbs: Default::default(),
             thumbs_tried: Default::default(),
+            send_failure: None,
+            last_level: Default::default(),
             courier: None,
             seen: delivery::Seen::default(),
             receipts: BTreeMap::new(),
@@ -3208,6 +3340,43 @@ mod tests {
             at("2026-10-28T08:00:00Z"),
         ));
         made["experiment"]["id"].as_str().or(made["id"].as_str()).unwrap().to_string()
+    }
+
+    #[test]
+    fn a_form_photo_is_cleaned_stored_and_its_location_read() {
+        let scratch = Scratch::new("formphoto");
+        let mut s = publishing_in(&scratch);
+        let (_, url) = photo_on_disk(&scratch);
+        let out = data(&s.add_photo(&json!({ "path": url, "maxMbEach": 5 }).to_string()));
+
+        let entry = &out["entry"];
+        let cid = entry["cid"].as_str().expect("a cid");
+        assert!(cid.starts_with("logos:"), "{out}");
+        let held = s.store.as_deref().unwrap().get(store::bare_cid(cid), true).unwrap();
+        assert_eq!(crate::media::remaining_metadata(&held), None, "GPS went to Storage");
+        assert_eq!(entry["bytes"], json!(held.len()));
+        // What was read before cleaning comes back for the form to prefill.
+        assert!(out["exif"]["location"].is_object(), "{out}");
+        assert_eq!(out["name"], json!("cover.jpg"));
+
+        // And it is exactly what a submission's photo field accepts.
+        let doc = json!({ "photos": [entry] });
+        assert!(doc["photos"][0]["sha256"].as_str().unwrap().len() == 64);
+    }
+
+    #[test]
+    fn a_form_photo_needs_storage_and_respects_the_size_limit() {
+        let scratch = Scratch::new("formphoto-limits");
+        let (path, _) = photo_on_disk(&scratch);
+        let mut offline = empty_in(&scratch);
+        let out = envelope(&offline.add_photo(&json!({ "path": path.to_str().unwrap() }).to_string()));
+        assert_eq!(out["error"]["code"], json!(api::code::NOT_WIRED));
+
+        let mut s = publishing_in(&scratch);
+        let out = envelope(&s.add_photo(
+            &json!({ "path": path.to_str().unwrap(), "maxMbEach": 0.000001 }).to_string(),
+        ));
+        assert_eq!(out["error"]["code"], json!(api::code::MEDIA), "{out}");
     }
 
     #[test]
@@ -3332,6 +3501,26 @@ mod tests {
             assert_eq!(c["level"], json!(expected), "{reported:?}: {c}");
             assert!(!c["reason"].as_str().unwrap().is_empty());
         }
+    }
+
+    #[test]
+    fn a_refused_send_turns_the_dot_amber_until_one_gets_out() {
+        let scratch = Scratch::new("connection-refused");
+        let mut s = publishing_in(&scratch);
+        let courier = std::sync::Arc::new(crate::delivery::MemoryCourier::new());
+        s.attach_courier(Box::new(SharedCourier(courier.clone())));
+        assert_eq!(s.connection()["level"], json!("online"));
+
+        courier.push_raw(json!({ "kind": "sendFailed", "requestId": "r1", "messageHash": "0x1",
+                             "error": "Unable to send within retry time window" }));
+        s.drain(at("2026-10-30T09:16:53Z"));
+        let c = s.connection();
+        assert_eq!(c["level"], json!("degraded"), "{c}");
+        assert!(c["reason"].as_str().unwrap().contains("RLN membership"), "{c}");
+
+        courier.push_raw(json!({ "kind": "sent", "requestId": "r2", "messageHash": "0x2" }));
+        s.drain(at("2026-10-30T09:20:00Z"));
+        assert_eq!(s.connection()["level"], json!("online"));
     }
 
     #[test]
@@ -4598,6 +4787,9 @@ mod tests {
         fn rln(&self) -> crate::delivery::RlnStatus {
             self.0.rln()
         }
+        fn connection(&self) -> Option<String> {
+            self.0.connection()
+        }
         fn inbox(&self) -> Vec<Value> {
             self.0.inbox()
         }
@@ -4726,6 +4918,64 @@ mod tests {
             "submitterName": "Dr Rao"
         })
         .to_string()
+    }
+
+    fn with_wallet(s: &mut Session, wallet: &str) {
+        let saved = s.profile_save(
+            &json!({ "fields": { "wallet": { "value": wallet, "share": false } } }).to_string(),
+        );
+        assert_eq!(envelope(&saved)["ok"], json!(true), "{saved}");
+    }
+
+    fn submit_with_wallet(id: &str, include: bool) -> String {
+        let mut request: Value = serde_json::from_str(&submit_request(id, 2)).unwrap();
+        request["includeWallet"] = json!(include);
+        request.to_string()
+    }
+
+    #[test]
+    fn the_wallet_goes_in_only_when_ticked_and_only_from_the_profile() {
+        let scratch = Scratch::new("wallet");
+        let (mut s, id) = creator_ready_to_submit(&scratch);
+        with_wallet(&mut s, "lez1qexamplewalletaddress");
+
+        let without = data(&s.submit(&submit_with_wallet(&id, false), at("2026-10-28T09:00:00Z")));
+        assert!(without["submission"].get("wallet").is_none(), "{without}");
+
+        // A wallet in the request itself is ignored: only the profile's counts.
+        let mut forged: Value = serde_json::from_str(&submit_with_wallet(&id, true)).unwrap();
+        forged["wallet"] = json!("someone-elses-wallet");
+        let with = data(&s.submit(&forged.to_string(), at("2026-10-28T09:05:00Z")));
+        let doc = &with["submission"];
+        assert_eq!(doc["wallet"], json!("lez1qexamplewalletaddress"), "{with}");
+        assert!(crate::sign::verify(doc).is_ok(), "the wallet is not covered by the signature");
+        assert!(schema::errors_as(doc, schema::Kind::Submission).is_empty());
+
+        let table = data(&s.results(
+            &json!({ "experimentId": id, "protocolId": "bird-sighting" }).to_string(),
+        ));
+        let wallets: Vec<&str> = table["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["submitter_wallet"].as_str().unwrap())
+            .collect();
+        assert!(wallets.contains(&"lez1qexamplewalletaddress"), "{table}");
+        assert!(wallets.contains(&""), "an unticked submission showed a wallet");
+    }
+
+    #[test]
+    fn ticking_the_wallet_box_with_no_wallet_saved_is_refused() {
+        let scratch = Scratch::new("wallet-none");
+        let (mut s, id) = creator_ready_to_submit(&scratch);
+        let out = envelope(&s.submit(&submit_with_wallet(&id, true), at("2026-10-28T09:00:00Z")));
+        assert_eq!(out["ok"], json!(false));
+        assert_eq!(out["error"]["code"], json!(api::code::BAD_REQUEST));
+        assert!(s.submissions.is_empty(), "something was submitted anyway");
+
+        with_wallet(&mut s, "two words");
+        let out = envelope(&s.submit(&submit_with_wallet(&id, true), at("2026-10-28T09:00:00Z")));
+        assert_eq!(out["ok"], json!(false), "a wallet with a space was put in a document");
     }
 
     #[test]
@@ -5139,6 +5389,8 @@ mod tests {
             saved_state: None,
             thumbs: Default::default(),
             thumbs_tried: Default::default(),
+            send_failure: None,
+            last_level: Default::default(),
             courier: None,
             seen: delivery::Seen::default(),
             receipts: BTreeMap::new(),
@@ -5170,6 +5422,8 @@ mod tests {
             saved_state: None,
             thumbs: Default::default(),
             thumbs_tried: Default::default(),
+            send_failure: None,
+            last_level: Default::default(),
             courier: None,
             seen: delivery::Seen::default(),
             receipts: BTreeMap::new(),
@@ -5288,6 +5542,8 @@ mod tests {
             saved_state: None,
             thumbs: Default::default(),
             thumbs_tried: Default::default(),
+            send_failure: None,
+            last_level: Default::default(),
             courier: None,
             seen: delivery::Seen::default(),
             receipts: BTreeMap::new(),

@@ -239,16 +239,32 @@ Flickable {
                                 spacing: Theme.s2
 
                                 Text {
+                                    id: whoText
+                                    objectName: "submitterCell"
                                     width: parent.width
                                     elide: Text.ElideRight
                                     // A self-chosen name if there is one, else
                                     // the key fingerprint — never the full key.
-                                    text: dataRow.modelData.submitter_name
-                                          ? dataRow.modelData.submitter_name
-                                          : Core.fingerprint(dataRow.modelData.submitter)
+                                    // Then the wallet, shortened, when the
+                                    // submitter chose to include it; the full
+                                    // address is on hover and in the export.
+                                    readonly property string wallet: dataRow.modelData.submitter_wallet
+                                                                     ? dataRow.modelData.submitter_wallet : ""
+                                    text: (dataRow.modelData.submitter_name
+                                           ? dataRow.modelData.submitter_name
+                                           : Core.fingerprint(dataRow.modelData.submitter))
+                                          + (wallet === "" ? ""
+                                             : "  \u00b7  " + (wallet.length > 14
+                                                                ? wallet.slice(0, 8) + "\u2026" + wallet.slice(-4)
+                                                                : wallet))
                                     font.family: dataRow.modelData.submitter_name ? Theme.sans : Theme.mono
                                     font.pixelSize: Theme.small
                                     color: Theme.ink
+                                    Accessible.name: text + (wallet === "" ? "" : ". Wallet " + wallet)
+
+                                    HoverHandler { id: whoHover }
+                                    ToolTip.visible: whoHover.hovered && whoText.wallet !== ""
+                                    ToolTip.text: "Wallet: " + whoText.wallet
                                 }
 
                                 Row {
